@@ -1,0 +1,644 @@
+================================================================================
+                         GAMECRAFT - GAME DOCUMENTATION
+                              GAME 4: RHYTHM TAP
+================================================================================
+
+DOCUMENT VERSION: 1.0
+LAST UPDATED: 2025
+GAME FILE: RhythmTap.ino
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+Rhythm Tap is a single-button rhythm/timing game inspired by games like 
+Guitar Hero. Notes continuously scroll down a vertical track, and the 
+player must press the button at the exact moment each note reaches the 
+"hit zone" near the bottom of the screen. Unlike Stop The Bar (which 
+handles ONE moving element per round), Rhythm Tap manages MULTIPLE 
+simultaneous notes on screen, each moving independently, testing the 
+player's ability to maintain a continuous rhythm rather than react to a 
+single isolated event.
+
+Scoring is tiered by accuracy (PERFECT / GOOD / MISS), and the game 
+tracks combo streaks that drive progressive difficulty - notes fall 
+faster and spawn more frequently as the player's combo grows.
+
+GAME GENRE     : Rhythm / Pattern Timing
+CONTROL SCHEME : Single Button (Tap in sync with falling notes)
+DIFFICULTY     : Progressive (speed increases & spawn interval decreases 
+                 every 8 combo points)
+DISPLAY        : 128x64 OLED (SH1106 driver, SPI interface)
+MICROCONTROLLER: Arduino Nano
+
+--------------------------------------------------------------------------------
+HOW TO PLAY
+--------------------------------------------------------------------------------
+1. Power on the device - Start Screen appears showing "RHYTHM TAP"
+2. Press the button to begin the game
+3. Notes (horizontal bars) continuously spawn at the top of a vertical 
+   track and scroll downward
+4. A highlighted "hit zone" box sits near the bottom of the track
+5. Tap the button exactly when a note overlaps the hit zone:
+   - Very close to center = "PERFECT!" (+10 points)
+   - Slightly off = "GOOD" (+5 points)
+   - Too far off, or no note nearby = "MISS" / "EARLY!" (counts as a miss)
+6. Consecutive successful hits build a COMBO streak
+7. Every 8 combo points, difficulty increases:
+   - Notes fall faster
+   - Notes spawn more frequently (up to a minimum interval of 500ms)
+8. Missing a note (letting it pass the hit zone) or mistiming a tap both 
+   count toward your miss total
+9. The game ends after 5 total misses
+10. Press the button again on the Game Over screen to return to the 
+    start screen and play again
+
+================================================================================
+2. HARDWARE REQUIREMENTS
+================================================================================
+
+COMPONENT                  | QUANTITY | NOTES
+----------------------------|----------|---------------------------------------
+Arduino Nano                | 1        | Main microcontroller
+OLED Display 128x64 (SH1106)| 1        | SPI interface (7-pin version)
+Push Button                 | 1        | Momentary, normally open recommended
+4x AA Battery Holder         | 1        | Power supply
+Jumper Wires                | ~10      | For connections
+Breadboard or Custom PCB    | 1        | For prototyping/final build
+
+--------------------------------------------------------------------------------
+WIRING / PIN CONNECTIONS
+--------------------------------------------------------------------------------
+
+OLED DISPLAY (SPI MODE):
+    OLED Pin        Arduino Nano Pin
+    -----------------------------------
+    MOSI (SDA)  ->  D10
+    CLK (SCK)   ->  D8
+    DC          ->  D7
+    CS          ->  D5
+    RST         ->  D9
+    VCC         ->  5V (or 3.3V depending on your module)
+    GND         ->  GND
+
+PUSH BUTTON:
+    Button Pin 1  ->  D2 (Arduino)
+    Button Pin 2  ->  GND
+    
+    NOTE: Like Stop The Bar, this game uses EDGE DETECTION (checking 
+    for the transition from not-pressed to pressed) rather than 
+    continuous state reading. This ensures each physical tap registers 
+    as exactly ONE input event, regardless of how briefly or long the 
+    button is held. If your button reads LOW when pressed (opposite of 
+    this code's assumption), change the comparison in updateGame() from 
+    "currentButtonState == HIGH && lastButtonState == LOW" accordingly.
+
+POWER:
+    4x AA Battery Pack (6V) -> Arduino Nano VIN pin, GND -> GND
+
+================================================================================
+3. REQUIRED LIBRARIES
+================================================================================
+
+1. Adafruit GFX Library       - Core graphics functions
+2. Adafruit SH110X Library    - SH1106 OLED driver
+3. SPI Library (built-in)     - SPI communication protocol
+4. Wire Library (built-in)    - Required dependency for Adafruit libraries
+
+================================================================================
+4. GLOBAL VARIABLES REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+DISPLAY OBJECT
+--------------------------------------------------------------------------------
+Adafruit_SH1106G display
+    The main display object used to draw all graphics.
+
+--------------------------------------------------------------------------------
+GAME STATE MACHINE
+--------------------------------------------------------------------------------
+enum GameState { START_SCREEN, PLAYING, GAME_OVER_STATE }
+
+    A simpler 3-state enum compared to Memory Beep's 6 states, since 
+    Rhythm Tap's gameplay is continuous rather than phase-based (no 
+    separate "watching" vs "input" phases - both note movement and 
+    input handling occur simultaneously within the single PLAYING state).
+
+VARIABLE | TYPE      | DEFAULT     | DESCRIPTION
+---------|-----------|-------------|---------------------------------------
+state    | GameState | START_SCREEN| Tracks current game state
+
+--------------------------------------------------------------------------------
+TRACK / HIT ZONE CONFIGURATION (CONSTANTS)
+--------------------------------------------------------------------------------
+CONSTANT       | VALUE | DESCRIPTION
+----------------|-------|--------------------------------------------------
+trackX          | 60    | X-position of the left boundary of the vertical 
+                |       | track where notes scroll down
+trackWidth      | 20    | Width of the track in pixels
+hitZoneY        | 50    | Y-position where the hit zone box begins - this 
+                |       | is the target area where notes should be tapped
+hitZoneHeight   | 6     | Height of the hit zone box
+spawnY          | 0     | Y-position where new notes appear (top of screen)
+
+--------------------------------------------------------------------------------
+NOTE SYSTEM (ARRAYS FOR MULTIPLE SIMULTANEOUS NOTES)
+--------------------------------------------------------------------------------
+CONSTANT/VAR  | TYPE   | SIZE/DEFAULT | DESCRIPTION
+---------------|--------|--------------|--------------------------------------
+MAX_NOTES      | #define| 6            | Maximum number of notes that can 
+               |        |              | exist on screen simultaneously
+noteY[]        | float  | [6]          | Vertical position of each note. 
+               |        |              | Uses FLOAT (not int) to allow 
+               |        |              | smoother sub-pixel movement speeds 
+               |        |              | like 1.2 pixels/frame, which would 
+               |        |              | round awkwardly with integers
+noteActive[]   | bool   | [6]          | Whether each note "slot" is 
+               |        |              | currently in use (true) or 
+               |        |              | available for a new note to spawn 
+               |        |              | into (false)
+noteSpeed      | float  | 1.2          | How many pixels each active note 
+               |        |              | moves downward per frame. 
+               |        |              | Increases with difficulty level.
+lastSpawnTime  | ulong  | 0            | Timestamp of the last note spawn, 
+               |        |              | used to control spawn timing
+spawnInterval  | int    | 1200         | Milliseconds between each new note 
+               |        |              | spawn. Decreases as difficulty 
+               |        |              | increases (minimum 500ms)
+
+--------------------------------------------------------------------------------
+SCORING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE   | TYPE | DEFAULT | DESCRIPTION
+-----------|------|---------|--------------------------------------------------
+score      | int  | 0       | Cumulative score (+10 Perfect, +5 Good)
+level      | int  | 1       | Current difficulty level
+combo      | int  | 0       | Current consecutive successful hit streak, 
+           |      |         | resets to 0 on any miss
+maxCombo   | int  | 0       | Highest combo achieved during current game 
+           |      |         | session (persists across the current 
+           |      |         | playthrough, reset on startGame())
+misses     | int  | 0       | Total accumulated misses this game
+maxMisses  | int  | 5       | Miss threshold that ends the game
+bestScore  | int  | 0       | Highest score achieved across ALL games this 
+           |      |         | session (persists across restarts until 
+           |      |         | power-off, similar to other GameCraft games)
+
+--------------------------------------------------------------------------------
+FEEDBACK TEXT SYSTEM
+--------------------------------------------------------------------------------
+VARIABLE          | TYPE    | DEFAULT | DESCRIPTION
+-------------------|---------|---------|---------------------------------------
+feedbackText       | String  | ""      | Currently displayed feedback message 
+                   |         |         | (e.g., "PERFECT!", "GOOD", "MISS", 
+                   |         |         | "EARLY!"). Empty string means no 
+                   |         |         | feedback currently showing.
+feedbackTime       | ulong   | 0       | Timestamp when current feedback 
+                   |         |         | message was triggered
+feedbackDuration   | const   | 400ms   | How long feedback text remains 
+                   | int     |         | visible before automatically 
+                   |         |         | clearing
+
+NOTE: This game uses the Arduino String class (capital S) for 
+feedbackText, unlike other GameCraft games which primarily use C-style 
+string literals directly in display.print() calls. This is a convenience 
+choice - String objects are easier to assign/reassign dynamically, though 
+they carry a small memory fragmentation risk on very memory-constrained 
+setups (acceptable here since usage is minimal and infrequent).
+
+--------------------------------------------------------------------------------
+BUTTON INPUT VARIABLES (EDGE DETECTION)
+--------------------------------------------------------------------------------
+VARIABLE         | TYPE | DEFAULT | DESCRIPTION
+-----------------|------|---------|-------------------------------------------
+lastButtonState  | bool | HIGH    | Previous frame's button reading, used 
+                 |      |         | for edge detection (same pattern as 
+                 |      |         | Stop The Bar)
+
+--------------------------------------------------------------------------------
+HARDWARE CONSTANT
+--------------------------------------------------------------------------------
+buttonPin     | const int | 2  | Digital pin connected to the push button
+
+================================================================================
+5. FUNCTION-BY-FUNCTION BREAKDOWN
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 void setup()
+--------------------------------------------------------------------------------
+PURPOSE: Runs once at power-on. Initializes hardware and note array state.
+
+WHAT IT DOES:
+  1. Sets buttonPin as INPUT_PULLUP
+  2. Initializes the OLED display
+  3. Clears the display buffer
+  4. Seeds the random number generator (available for future use, though 
+     current version doesn't use randomness in note timing/position - 
+     notes always spawn at a fixed X position)
+  5. Calls resetNotes() to ensure all note slots start inactive
+
+--------------------------------------------------------------------------------
+5.2 void resetNotes()
+--------------------------------------------------------------------------------
+PURPOSE: Clears all note slots, marking them as inactive and resetting 
+their position to the spawn point.
+
+WHAT IT DOES:
+  For each of the MAX_NOTES (6) slots:
+    - noteActive[i] = false (slot available for new note)
+    - noteY[i] = spawnY (reset position to top, though irrelevant while 
+      inactive)
+
+CALLED FROM: setup() (initial state) and startGame() (fresh game session)
+
+--------------------------------------------------------------------------------
+5.3 void loop()
+--------------------------------------------------------------------------------
+PURPOSE: Main game state machine using a switch statement (same 
+architectural pattern as Memory Beep, but with only 3 states).
+
+STRUCTURE:
+  switch(state) {
+    case START_SCREEN:    -> show title screen, wait for press to start
+    case PLAYING:         -> call updateGame() + drawGame(), then delay(20)
+    case GAME_OVER_STATE: -> show final results, wait for press to restart
+  }
+
+NOTE: Unlike Memory Beep's more complex phase-based state machine, 
+Rhythm Tap's PLAYING state handles BOTH note movement AND player input 
+simultaneously within a single continuous state - this reflects the 
+real-time, continuous nature of rhythm games versus turn-based memory 
+games.
+
+--------------------------------------------------------------------------------
+5.4 void startGame()
+--------------------------------------------------------------------------------
+PURPOSE: Resets all game variables and begins a fresh play session.
+
+WHAT IT DOES:
+  1. score = 0, level = 1
+  2. combo = 0, maxCombo = 0, misses = 0
+  3. noteSpeed reset to 1.2 (base speed)
+  4. spawnInterval reset to 1200ms (base spawn rate)
+  5. resetNotes() called (clears any leftover notes from previous game)
+  6. lastSpawnTime = millis() (starts the spawn timer fresh)
+  7. feedbackText = "" (clears any leftover feedback message)
+  8. state = PLAYING (begins active gameplay)
+
+--------------------------------------------------------------------------------
+5.5 void spawnNote()
+--------------------------------------------------------------------------------
+PURPOSE: Activates one available (inactive) note slot to create a new 
+falling note.
+
+HOW IT WORKS:
+  Loops through all MAX_NOTES slots, finds the FIRST inactive slot 
+  (noteActive[i] == false), and:
+    - Sets noteActive[i] = true
+    - Resets noteY[i] = spawnY (starts at top of screen)
+    - Breaks out of the loop immediately after activating one note 
+      (only spawns ONE note per call)
+
+DESIGN NOTE: This "object pooling" pattern (reusing a fixed-size array 
+of slots rather than dynamically creating/destroying note objects) is a 
+memory-efficient technique well-suited to Arduino's limited RAM - it 
+avoids the need for dynamic memory allocation entirely.
+
+--------------------------------------------------------------------------------
+5.6 void updateGame()
+--------------------------------------------------------------------------------
+PURPOSE: Core game logic - handles note spawning, movement, missed-note 
+detection, button input, feedback timing, and game-over conditions. 
+Called once per frame from loop() during the PLAYING state.
+
+SECTION-BY-SECTION BREAKDOWN:
+
+  A) NOTE SPAWNING (TIME-BASED)
+     if (now - lastSpawnTime > spawnInterval) {
+       spawnNote();
+       lastSpawnTime = now;
+     }
+     Checks if enough time has passed since the last spawn to trigger a 
+     new note, using non-blocking millis()-based timing (consistent with 
+     the pattern used throughout GameCraft games).
+
+  B) NOTE MOVEMENT & MISS DETECTION (LOOP OVER ALL 6 SLOTS)
+     For each ACTIVE note:
+       - noteY[i] += noteSpeed (moves the note down by the current speed, 
+         using float arithmetic for smooth sub-pixel movement)
+       - IF noteY[i] > 64 (note has moved past the bottom of the screen 
+         WITHOUT being tapped):
+           - noteActive[i] = false (deactivate/remove the note)
+           - registerMiss() called (counts as a miss, breaks combo)
+
+  C) BUTTON INPUT (EDGE DETECTION)
+     bool currentButtonState = digitalRead(buttonPin);
+     if (currentButtonState == HIGH && lastButtonState == LOW) {
+       handleTap();
+     }
+     lastButtonState = currentButtonState;
+     
+     Same edge-detection pattern as Stop The Bar - ensures handleTap() 
+     fires exactly once per physical button press, regardless of hold 
+     duration.
+
+  D) FEEDBACK TEXT AUTO-CLEAR
+     if (feedbackText != "" && now - feedbackTime > feedbackDuration) {
+       feedbackText = "";
+     }
+     After 400ms, any currently displayed feedback message ("PERFECT!", 
+     "MISS", etc.) automatically clears itself, keeping the display 
+     clean for the next event.
+
+  E) GAME OVER CHECK
+     if (misses >= maxMisses) {
+       if (score > bestScore) bestScore = score;
+       state = GAME_OVER_STATE;
+     }
+     Checked every frame - as soon as the miss threshold (5) is reached, 
+     the game immediately transitions to the game over state.
+
+--------------------------------------------------------------------------------
+5.7 void handleTap()
+--------------------------------------------------------------------------------
+PURPOSE: Called when the player presses the button. Determines WHICH 
+note (if any) the player was attempting to hit, scores the attempt based 
+on timing accuracy, and updates combo/difficulty progression.
+
+LOGIC BREAKDOWN:
+
+  A) FIND THE CLOSEST ACTIVE NOTE TO THE HIT ZONE
+     Loops through all MAX_NOTES slots, and for each ACTIVE note, 
+     calculates its distance from the hit zone:
+       float dist = abs(noteY[i] - hitZoneY);
+     Tracks the note with the SMALLEST distance (closestDist) and its 
+     index (closestIndex).
+     
+     WHY THIS APPROACH: Since multiple notes can be on screen 
+     simultaneously, this ensures the tap is always evaluated against 
+     the MOST RELEVANT note (the one nearest the hit zone), avoiding 
+     ambiguity when several notes exist at once.
+
+  B) IF NO ACTIVE NOTES EXIST AT ALL (closestIndex == -1):
+     - feedbackText = "EARLY!" (player tapped with nothing on screen to hit)
+     - feedbackTime = millis()
+     - Function returns immediately (no score change, no miss registered 
+       - this is a "free" false tap with only a text warning, not 
+       penalized as a miss)
+
+  C) SCORING TIERS BASED ON closestDist:
+     - IF closestDist <= 3 (very close to perfect center alignment):
+         PERFECT: score += 10, combo++, feedbackText = "PERFECT!"
+     - ELSE IF closestDist <= 8 (reasonably close):
+         GOOD: score += 5, combo++, feedbackText = "GOOD"
+     - ELSE (too far from the hit zone, even though a note exists):
+         MISS: registerMiss() called (increments misses, resets combo), 
+         feedbackText = "MISS", function returns immediately (skips the 
+         remaining combo/level-up logic below since this path returns 
+         early)
+
+  D) ON SUCCESSFUL HIT (PERFECT or GOOD only - MISS returns early above):
+     - feedbackTime = millis()
+     - noteActive[closestIndex] = false (removes the successfully-hit 
+       note from the track)
+     - IF combo > maxCombo: maxCombo = combo (track personal best combo)
+     - DIFFICULTY PROGRESSION: every 8 combo points (combo % 8 == 0):
+         - level++
+         - noteSpeed += 0.3 (notes fall faster)
+         - IF spawnInterval > 500: spawnInterval -= 100 (notes spawn more 
+           frequently, floor of 500ms to prevent overwhelming spawn rates)
+
+--------------------------------------------------------------------------------
+5.8 void registerMiss()
+--------------------------------------------------------------------------------
+PURPOSE: Centralized miss-handling logic, called both when a note passes 
+the hit zone untapped (from updateGame()) and when a mistimed tap occurs 
+(from handleTap()).
+
+WHAT IT DOES:
+  - misses++ (increment total miss count)
+  - combo = 0 (reset current combo streak to zero)
+  - feedbackText = "MISS"
+  - feedbackTime = millis()
+
+DESIGN NOTE: Having this logic in a single reusable function (rather 
+than duplicated in both calling locations) is good practice - ensures 
+consistent miss-handling behavior regardless of WHICH situation 
+triggered the miss.
+
+--------------------------------------------------------------------------------
+5.9 void drawGame()
+--------------------------------------------------------------------------------
+PURPOSE: Renders the current frame during active gameplay.
+
+DRAWING ORDER:
+  1. Clear display buffer
+  2. Draw track boundaries: two vertical lines marking the left and 
+     right edges of the note-falling track (at trackX and trackX + 
+     trackWidth)
+  3. Draw hit zone: a hollow rectangle outline at the target position 
+     (trackX, hitZoneY, trackWidth, hitZoneHeight)
+  4. Draw all ACTIVE notes: each rendered as a filled rectangle slightly 
+     narrower than the track (trackWidth - 4, with 2px margin on each 
+     side) at its current noteY position (cast to int for pixel-based 
+     drawing since noteY is stored as float)
+  5. Draw feedback text (if currently active) positioned just above the 
+     hit zone
+  6. Draw HUD elements:
+     - LEFT SIDE: "Score:" label + numeric value, "Lvl:" + level value
+     - RIGHT SIDE: "Combo" label + numeric value, "Miss:X/5" counter
+  7. Push frame to physical display
+
+--------------------------------------------------------------------------------
+5.10 void drawStartScreen()
+--------------------------------------------------------------------------------
+PURPOSE: Title/instructions screen shown before gameplay begins.
+
+CONTENT SHOWN:
+  - "RHYTHM TAP" title
+  - "Tap when note hits" / "the box at bottom!" instructions
+  - "Perfect timing = more" / "points. Good luck!" scoring hint
+
+NOTE: Includes a small delay(50) at the end - a minor stability delay 
+that, while technically blocking, is brief enough to not affect button 
+responsiveness on the start screen meaningfully.
+
+--------------------------------------------------------------------------------
+5.11 void drawGameOver()
+--------------------------------------------------------------------------------
+PURPOSE: Final results screen shown after reaching the miss limit.
+
+CONTENT SHOWN:
+  - "GAME OVER"
+  - "Score: [final score]"
+  - "Max Combo: [best combo this game]"
+  - "Best Score: [all-time session best]"
+  - "Press to Play Again"
+
+================================================================================
+6. GAME STATE FLOW DIAGRAM
+================================================================================
+
+    [POWER ON] -> resetNotes()
+         |
+         v
+  +----------------+
+  | START_SCREEN   | <----------------------------------------+
+  +----------------+                                            |
+         |                                                      |
+         | (button pressed -> startGame())                     |
+         v                                                      |
+  +--------------------------------------------+                |
+  |                  PLAYING                     |               |
+  |  (continuous loop, every frame):              |              |
+  |   - spawn notes on timer                       |             |
+  |   - move all active notes downward              |            |
+  |   - detect missed notes (past hit zone)           |          |
+  |   - detect button taps (edge-triggered)             |        |
+  |   - score taps based on proximity to hit zone         |      |
+  |   - update combo / difficulty                           |    |
+  +--------------------------------------------+                |
+         |                                                      |
+         | (misses >= maxMisses)                                |
+         v                                                      |
+  +----------------+                                            |
+  | GAME_OVER_STATE|--------------------------------------------+
+  +----------------+   (button pressed -> state = START_SCREEN)
+
+================================================================================
+7. KEY TECHNICAL CONCEPTS DEMONSTRATED
+================================================================================
+
+1. MULTIPLE SIMULTANEOUS GAME OBJECTS (OBJECT POOLING PATTERN)
+   Unlike Flappy Bird's fixed 3-pipe array (always active) or Stop The 
+   Bar's single bar, Rhythm Tap manages up to 6 independent notes using 
+   an "object pool" pattern - a fixed-size array where slots are marked 
+   active/inactive and reused, avoiding dynamic memory allocation 
+   entirely (critical for Arduino's limited RAM).
+
+2. FLOAT-BASED POSITION TRACKING FOR SMOOTH SUB-PIXEL MOVEMENT
+   noteY[] uses float instead of int, allowing noteSpeed values like 1.2 
+   pixels/frame to accumulate smoothly over time rather than being 
+   truncated/rounded each frame - resulting in smoother-looking motion 
+   at fractional speeds.
+
+3. "CLOSEST MATCH" INPUT RESOLUTION
+   When multiple notes exist on screen simultaneously, handleTap() 
+   doesn't just check the FIRST or LAST note - it actively searches for 
+   the CLOSEST one to the hit zone, ensuring the game always interprets 
+   player input against the most contextually relevant target.
+
+4. TIERED DISTANCE-BASED SCORING
+   Similar in concept to Stop The Bar's proximity scoring, but 
+   implemented with discrete tiers (PERFECT/GOOD/MISS) rather than a 
+   continuous formula - demonstrating an alternative scoring design 
+   pattern for timing-based games.
+
+5. COMBO-DRIVEN DIFFICULTY SCALING
+   Like Stop The Bar's streak-based difficulty, Rhythm Tap increases 
+   speed and spawn rate based on combo milestones (every 8 points) 
+   rather than total score or elapsed time - rewarding/challenging 
+   skilled, consistent players more aggressively.
+
+6. DUAL-CONDITION MISS DETECTION
+   Misses can occur in TWO distinct ways in this game: (1) a note 
+   passing the hit zone completely untapped, or (2) a mistimed tap when 
+   a note exists but isn't close enough. Both paths funnel into the 
+   same registerMiss() function, demonstrating good code reuse for 
+   shared failure-state logic.
+
+7. TIME-LIMITED UI FEEDBACK MESSAGES
+   feedbackText combined with feedbackTime and feedbackDuration 
+   implements a simple non-blocking "toast message" system - text 
+   appears, then automatically disappears after a fixed duration, 
+   without ever using delay() to pause gameplay.
+
+================================================================================
+8. CUSTOMIZATION GUIDE
+================================================================================
+
+WANT TO...                          | CHANGE THIS VARIABLE/VALUE
+-------------------------------------|------------------------------------------
+Make notes fall slower/faster        | noteSpeed = 1.2  ->  try 0.8 (easier) 
+                                      | or 2.0 (harder)
+Change how forgiving hit timing is   | closestDist <= 3 (PERFECT) and 
+                                      | closestDist <= 8 (GOOD)  ->  increase 
+                                      | these thresholds for a more forgiving 
+                                      | hit window
+Allow more notes on screen at once   | MAX_NOTES = 6  ->  increase (also 
+                                      | increases noteY[] and noteActive[] 
+                                      | array sizes correspondingly)
+Change spawn rate                    | spawnInterval = 1200  ->  lower for 
+                                      | more frequent notes from the start
+Change difficulty ramp-up rate       | if (combo > 0 && combo % 8 == 0)  ->  
+                                      | change 8 to a different combo interval
+Give more/fewer allowed misses       | maxMisses = 5  ->  adjust up or down
+Change scoring values                | score += 10 (PERFECT) / score += 5 
+                                      | (GOOD)  ->  adjust point values
+Change feedback message duration     | feedbackDuration = 400  ->  adjust 
+                                      | (milliseconds) for longer/shorter 
+                                      | on-screen feedback text
+Widen/narrow the note track          | trackWidth = 20  ->  adjust (also 
+                                      | affects note rendering width in 
+                                      | drawGame())
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+ISSUE: Taps don't register any points even when timed well
+FIX: Verify closestDist thresholds (3 for PERFECT, 8 for GOOD) are 
+     appropriate for your noteSpeed and frame delay(20) combination. If 
+     notes move quickly between frames, the effective "window" of pixel 
+     positions that map to a good hit may be narrower than expected - 
+     consider increasing thresholds slightly or reducing noteSpeed.
+
+ISSUE: Multiple notes overlap visually and become hard to distinguish
+FIX: This can happen if spawnInterval becomes very short (due to high 
+     combo/difficulty) while noteSpeed hasn't increased proportionally. 
+     Consider tuning the balance between noteSpeed increases and 
+     spawnInterval decreases in the difficulty progression logic within 
+     handleTap().
+
+ISSUE: "EARLY!" feedback appears even when a note seems visually close
+FIX: This occurs when NO note is currently active (closestIndex == -1) 
+     - check if your note might have already been removed (either 
+     successfully hit moments earlier, or missed/expired) right before 
+     your tap registered. This is more likely to happen near spawn 
+     boundaries or immediately after a note is cleared.
+
+ISSUE: Game becomes unplayable at high levels (notes too fast)
+FIX: The noteSpeed += 0.3 increment per 8-combo milestone can compound 
+     quickly during long combo streaks. Consider adding a maximum speed 
+     cap (e.g., "if (noteSpeed < 4.0) noteSpeed += 0.3;") to prevent 
+     speeds from becoming unreasonably fast during extended skilled play.
+
+ISSUE: bestScore or maxCombo not updating as expected
+FIX: bestScore only updates in updateGame() when the game-over condition 
+     triggers (misses >= maxMisses). If you exit/restart via other means, 
+     ensure this check still executes. maxCombo updates within 
+     handleTap() only on successful hits - verify combo is incrementing 
+     correctly for both PERFECT and GOOD tiers.
+
+================================================================================
+10. CODE STATISTICS
+================================================================================
+
+Total Lines of Code    : ~230
+Functions              : 10 (setup, resetNotes, loop, startGame, 
+                          spawnNote, updateGame, handleTap, registerMiss, 
+                          drawGame, drawStartScreen, drawGameOver)
+Global Variables        : ~20
+Arrays Used             : 2 (noteY[6] as float, noteActive[6] as bool)
+State Machine Type      : Enum + switch (3 states - simplest enum-based 
+                          state machine among the documented games)
+Data Types Used         | Notably uses FLOAT (noteY, noteSpeed) for smooth 
+                        | sub-pixel movement, and String class (feedbackText) 
+                        | - both unique among the 4 documented GameCraft games
+Libraries Required      : 4 (SPI, Wire, Adafruit_GFX, Adafruit_SH110X)
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
