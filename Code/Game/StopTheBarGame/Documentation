@@ -1,0 +1,551 @@
+================================================================================
+                         GAMECRAFT - GAME DOCUMENTATION
+                              GAME 2: STOP THE BAR
+================================================================================
+
+DOCUMENT VERSION: 1.0
+LAST UPDATED: 2025
+GAME FILE: StopTheBar.ino
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+Stop The Bar is a single-button precision/reflex game where a vertical bar 
+slides back and forth across a horizontal track. The player must press the 
+button at the exact right moment to "stop" the bar inside a highlighted 
+target zone. Scoring rewards precision (hitting closer to the center of the 
+zone earns more points), and the game features a lives system and streak 
+tracking to encourage repeated attempts.
+
+Unlike Flappy Bird (which is a continuous physics-based game), Stop The Bar 
+is a TURN-BASED / ROUND-BASED game - each "round" is a single moving bar and 
+a single button press, followed by a brief result display before the next 
+round begins.
+
+GAME GENRE     : Reflex / Precision Timing
+CONTROL SCHEME : Single Button (Tap to Stop)
+DIFFICULTY     : Progressive (zone shrinks & speed increases every 5-hit streak)
+DISPLAY        : 128x64 OLED (SH1106 driver, SPI interface)
+MICROCONTROLLER: Arduino Nano
+
+--------------------------------------------------------------------------------
+HOW TO PLAY
+--------------------------------------------------------------------------------
+1. Power on the device - Start Screen appears showing "STOP THE BAR"
+2. Press the button to begin the game
+3. A vertical bar moves back and forth along a horizontal track
+4. A highlighted "target zone" appears somewhere on the track
+5. Press the button when the bar is INSIDE the target zone
+6. Scoring is based on accuracy:
+   - Hitting near the CENTER of the zone = more points
+   - Hitting near the EDGE of the zone = fewer points (but still counts)
+   - Missing the zone entirely = lose a life, streak resets to 0
+7. Every 5 successful hits in a row (streak), the game gets harder:
+   - Bar moves faster
+   - Target zone becomes smaller
+8. The game ends when all 3 lives are lost
+9. Press the button again on the Game Over screen to restart
+
+================================================================================
+2. HARDWARE REQUIREMENTS
+================================================================================
+
+COMPONENT                  | QUANTITY | NOTES
+----------------------------|----------|---------------------------------------
+Arduino Nano                | 1        | Main microcontroller
+OLED Display 128x64 (SH1106)| 1        | SPI interface (7-pin version)
+Push Button                 | 1        | Momentary, normally open recommended
+4x AA Battery Holder         | 1        | Power supply
+Jumper Wires                | ~10      | For connections
+Breadboard or Custom PCB    | 1        | For prototyping/final build
+
+--------------------------------------------------------------------------------
+WIRING / PIN CONNECTIONS
+--------------------------------------------------------------------------------
+
+OLED DISPLAY (SPI MODE):
+    OLED Pin        Arduino Nano Pin
+    -----------------------------------
+    MOSI (SDA)  ->  D10
+    CLK (SCK)   ->  D8
+    DC          ->  D7
+    CS          ->  D5
+    RST         ->  D9
+    VCC         ->  5V (or 3.3V depending on your module)
+    GND         ->  GND
+
+PUSH BUTTON:
+    Button Pin 1  ->  D2 (Arduino)
+    Button Pin 2  ->  GND
+    
+    NOTE: This game uses INPUT_PULLUP mode AND edge detection (see 
+    Section 5 for details). The button press logic here is DIFFERENT 
+    from Flappy Bird - it specifically checks for the TRANSITION from 
+    "not pressed" to "pressed" (a rising edge), rather than continuously 
+    reading the button state every frame. If your button wiring reads 
+    LOW when pressed instead of HIGH, adjust the comparisons accordingly 
+    throughout updateGame().
+
+POWER:
+    4x AA Battery Pack (6V) -> Arduino Nano VIN pin, GND -> GND
+
+================================================================================
+3. REQUIRED LIBRARIES
+================================================================================
+
+1. Adafruit GFX Library       - Core graphics functions
+2. Adafruit SH110X Library    - SH1106 OLED driver
+3. SPI Library (built-in)     - SPI communication protocol
+4. Wire Library (built-in)    - Required dependency for Adafruit libraries
+
+================================================================================
+4. GLOBAL VARIABLES REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+DISPLAY OBJECT
+--------------------------------------------------------------------------------
+Adafruit_SH1106G display
+    The main display object used to draw all graphics.
+
+--------------------------------------------------------------------------------
+BAR (MOVING MARKER) VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE | DEFAULT | DESCRIPTION
+--------------|------|---------|----------------------------------------------
+barX          | int  | 10      | Current horizontal (X) position of the 
+              |      |         | moving bar marker
+barDir        | int  | 1       | Direction of bar movement: +1 (moving 
+              |      |         | right) or -1 (moving left)
+barSpeed      | int  | 2       | How many pixels the bar moves per frame. 
+              |      |         | Increases as difficulty progresses.
+
+--------------------------------------------------------------------------------
+TARGET ZONE VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE | DEFAULT | DESCRIPTION
+--------------|------|---------|----------------------------------------------
+zoneStart     | int  | 50      | X-position of the LEFT edge of the target 
+              |      |         | zone. Randomized each round.
+zoneWidth     | int  | 25      | Width of the target zone in pixels. 
+              |      |         | Shrinks as difficulty increases (min 10px).
+
+--------------------------------------------------------------------------------
+GAME STATE / SCORING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE  | DEFAULT | DESCRIPTION
+--------------|-------|---------|--------------------------------------------
+score         | int   | 0       | Player's cumulative score
+level         | int   | 1       | Current difficulty level
+lives         | int   | 3       | Remaining lives; game ends at 0
+gameOver      | bool  | false   | True when lives reach 0
+gameStarted   | bool  | false   | True once player presses button on start 
+              |       |         | screen
+
+--------------------------------------------------------------------------------
+ROUND STATE VARIABLES (unique to this game's round-based structure)
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE  | DEFAULT | DESCRIPTION
+--------------|-------|---------|--------------------------------------------
+roundActive   | bool  | true    | True while the bar is actively moving and 
+              |       |         | waiting for the player's button press
+showResult    | bool  | false   | True during the brief "NICE HIT!" / 
+              |       |         | "MISSED!" feedback display period
+hitSuccess    | bool  | false   | Stores whether the last round was a hit 
+              |       |         | or miss (used to determine feedback text)
+resultTime    | ulong | 0       | Timestamp (millis()) when result feedback 
+              |       |         | began, used to time the 800ms display 
+              |       |         | window before advancing to next round
+
+--------------------------------------------------------------------------------
+BUTTON INPUT VARIABLES (EDGE DETECTION)
+--------------------------------------------------------------------------------
+VARIABLE         | TYPE | DEFAULT | DESCRIPTION
+-----------------|------|---------|-------------------------------------------
+buttonPin        | const int | 2 | Digital pin connected to push button
+lastButtonState  | bool | HIGH    | Stores the PREVIOUS frame's button 
+                 |      |         | reading. Compared against the CURRENT 
+                 |      |         | reading each frame to detect the exact 
+                 |      |         | moment of a new press (edge detection).
+
+--------------------------------------------------------------------------------
+STREAK TRACKING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE     | TYPE | DEFAULT | DESCRIPTION
+-------------|------|---------|-------------------------------------------------
+streak       | int  | 0       | Current consecutive successful hits. Resets 
+             |      |         | to 0 on any miss.
+bestStreak   | int  | 0       | Highest streak achieved during current play 
+             |      |         | session (persists across rounds, resets only 
+             |      |         | on full game reset via resetGame())
+
+================================================================================
+5. FUNCTION-BY-FUNCTION BREAKDOWN
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 void setup()
+--------------------------------------------------------------------------------
+PURPOSE: Runs once at power-on. Initializes hardware and starts the first 
+round.
+
+WHAT IT DOES:
+  1. Sets buttonPin as INPUT_PULLUP
+  2. Initializes the OLED display
+  3. Clears the display buffer
+  4. Seeds the random number generator using analogRead(0)
+  5. Calls setupRound() to configure the first round (bar position, 
+     initial target zone)
+
+--------------------------------------------------------------------------------
+5.2 void setupRound()
+--------------------------------------------------------------------------------
+PURPOSE: Configures/resets variables needed at the START of each new round. 
+Called both from setup() (first round) and from updateGame() (subsequent 
+rounds after a result is shown).
+
+WHAT IT DOES:
+  1. Resets barX to 10 (left starting position)
+  2. Resets barDir to 1 (moving right initially)
+  3. Randomizes zoneStart to a new position between X=20 and 
+     X=(128 - zoneWidth - 20) - this range ensures the zone always fits 
+     on screen with margin
+  4. Sets roundActive = true (bar begins moving, waiting for input)
+  5. Sets showResult = false (clears any previous result feedback)
+
+NOTE: This function does NOT reset score, lives, level, or streak - those 
+persist across rounds within the same game session. Only resetGame() 
+(Section 5.8) resets those.
+
+--------------------------------------------------------------------------------
+5.3 void loop()
+--------------------------------------------------------------------------------
+PURPOSE: Main game state machine, identical high-level structure to 
+Flappy Bird's loop().
+
+LOGIC FLOW:
+  IF game has not started:
+      -> Show start screen
+      -> Check for button press to begin game
+  ELSE IF game is running (not game over):
+      -> Update game logic (bar movement, input, round management)
+      -> Draw current frame
+      -> Wait 20ms (controls animation/bar speed)
+  ELSE (game over):
+      -> Show game over screen with final score and best streak
+      -> Check for button press to reset and play again
+
+--------------------------------------------------------------------------------
+5.4 void updateGame()
+--------------------------------------------------------------------------------
+PURPOSE: Core game logic - handles bar movement, button edge detection, 
+and round-to-round transitions. Called once per frame from loop().
+
+SECTION-BY-SECTION BREAKDOWN:
+
+  A) READ CURRENT BUTTON STATE
+     bool currentButtonState = digitalRead(buttonPin);
+     This is read once per frame and compared against lastButtonState 
+     (from the PREVIOUS frame) later in this function.
+
+  B) IF ROUND IS ACTIVE (bar is currently moving):
+     - Bar position updates: barX += barDir * barSpeed
+     - Boundary bounce logic:
+         - If barX reaches the right edge (>= 124), clamp position and 
+           reverse direction (barDir = -1)
+         - If barX reaches the left edge (<= 0), clamp position and 
+           reverse direction (barDir = 1)
+     - EDGE DETECTION CHECK:
+         if (currentButtonState == HIGH && lastButtonState == LOW)
+         
+         This specific pattern means: "the button was NOT pressed last 
+         frame, but IS pressed THIS frame" - i.e., the exact moment of 
+         a new button press. This prevents the game from registering 
+         multiple hits if the player holds the button down, and ensures 
+         checkResult() fires exactly ONCE per press.
+     - If a new press is detected, checkResult() is called.
+
+  C) IF SHOWING RESULT (roundActive is false, showResult is true):
+     - Waits 800ms (checked via millis() - resultTime > 800)
+     - After the wait:
+         - If lives <= 0: game ends (gameOver = true)
+         - Otherwise: setupRound() is called to start the next round
+
+  D) UPDATE lastButtonState
+     At the very end of the function, lastButtonState = currentButtonState 
+     saves this frame's reading for comparison next frame. This line 
+     MUST run every frame regardless of game state for edge detection 
+     to work correctly.
+
+--------------------------------------------------------------------------------
+5.5 void checkResult()
+--------------------------------------------------------------------------------
+PURPOSE: Called when the player presses the button during an active round. 
+Determines hit/miss, calculates score, and updates game difficulty.
+
+LOGIC BREAKDOWN:
+
+  A) DETERMINE BAR CENTER POSITION
+     int barCenter = barX + 2;
+     (barX is the LEFT edge of the 4px-wide bar rectangle, so +2 gives 
+     the approximate center point for accuracy calculations)
+
+  B) CHECK IF BAR CENTER IS WITHIN THE TARGET ZONE
+     if (barCenter >= zoneStart && barCenter <= zoneStart + zoneWidth)
+
+     IF SUCCESS:
+       - hitSuccess = true
+       - streak increments; bestStreak updates if this is a new record
+       - SCORING FORMULA:
+           zoneCenter = zoneStart + zoneWidth / 2  (middle of the zone)
+           distFromCenter = abs(barCenter - zoneCenter)  (how far off-center)
+           points = max(1, 10 - distFromCenter)  (closer to center = more 
+                    points, minimum 1 point guaranteed for any successful hit)
+       - score += points
+       - DIFFICULTY PROGRESSION: every 5 hits in the streak (streak % 5 == 0):
+           - level increments
+           - barSpeed increments (bar moves faster)
+           - zoneWidth decreases by 2 (down to a minimum of 10px) - 
+             makes future rounds harder to hit precisely
+
+     IF MISS (bar center outside zone):
+       - hitSuccess = false
+       - streak resets to 0 (best streak is NOT affected, it's already saved)
+       - lives decrements by 1
+
+  C) TRANSITION TO RESULT DISPLAY STATE
+     - roundActive = false (bar stops moving)
+     - showResult = true (triggers "NICE HIT!"/"MISSED!" text display)
+     - resultTime = millis() (starts the 800ms result display timer)
+
+--------------------------------------------------------------------------------
+5.6 void drawGame()
+--------------------------------------------------------------------------------
+PURPOSE: Renders the current frame to the OLED display.
+
+DRAWING ORDER:
+  1. Clear display buffer
+  2. Draw the track: a hollow rectangle spanning the full screen width, 
+     positioned at Y=30, height 8px (display.drawRect(0, 30, 128, 8, ...))
+  3. Draw the target zone: a FILLED rectangle at the zone's position 
+     (highlighting where the player needs to stop the bar), then an 
+     additional outline drawn on top (mostly redundant but kept for 
+     visual clarity/border emphasis)
+  4. IF round is active: draw the moving bar as a filled rectangle 
+     (4px wide, slightly taller than the track at Y=28 to Y=40, so it 
+     visually "sticks out" above/below the track for visibility)
+  5. IF showing result: display "NICE HIT!" or "MISSED!" text above 
+     the track
+  6. Draw HUD elements:
+     - Score (top-left, "S:")
+     - Level (top area, "L:")
+     - Lives (top-right area, "Lives:")
+     - Current streak (bottom-left, "Streak:")
+     - Best streak (bottom-right, "Best:")
+  7. Push frame to physical display
+
+--------------------------------------------------------------------------------
+5.7 void drawStartScreen()
+--------------------------------------------------------------------------------
+PURPOSE: Displays the title/instruction screen before gameplay begins.
+
+CONTENT SHOWN:
+  - "STOP THE BAR" title at (20, 15)
+  - "Press when bar is" instruction at (10, 30)
+  - "in the zone!" continuation at (25, 40)
+  - "Start" prompt at (45, 52)
+
+--------------------------------------------------------------------------------
+5.8 void drawGameOver()
+--------------------------------------------------------------------------------
+PURPOSE: Displays final results after all lives are lost.
+
+CONTENT SHOWN:
+  - "GAME OVER" at (30, 10)
+  - "Score: [final score]" at (20, 25)
+  - "Best Streak: [value]" at (20, 38)
+  - "Press to Retry" at (15, 52)
+
+--------------------------------------------------------------------------------
+5.9 void resetGame()
+--------------------------------------------------------------------------------
+PURPOSE: Fully resets the game session for a new playthrough, called when 
+the player presses the button on the Game Over screen.
+
+RESET ACTIONS:
+  - score back to 0
+  - level back to 1
+  - lives back to 3
+  - streak back to 0
+  - barSpeed back to 2
+  - zoneWidth back to 25 (undoes difficulty shrinkage)
+  - gameOver set to false
+  - gameStarted set to false (returns to start screen)
+  - setupRound() called to configure the first round of the new session
+
+NOTE: bestStreak is intentionally NOT reset here, allowing it to persist 
+as a "session high score" across multiple playthroughs until the Arduino 
+is powered off/restarted. This is a deliberate design choice to encourage 
+players to keep trying to beat their own best streak.
+
+================================================================================
+6. GAME STATE FLOW DIAGRAM
+================================================================================
+
+    [POWER ON]
+         |
+         v
+  +-------------+
+  | START SCREEN|  <-------------------------------------------+
+  +-------------+                                               |
+         |                                                       |
+         | (button pressed)                                     |
+         v                                                       |
+  +-------------------+                                          |
+  |  ROUND ACTIVE      |<--------------------------+             |
+  |  (bar moving,      |                            |             |
+  |   waiting for tap) |                            |             |
+  +-------------------+                            |             |
+         |                                          |             |
+         | (button pressed -> checkResult())        |             |
+         v                                          |             |
+  +-------------------+                             |             |
+  |  SHOWING RESULT    |                            |             |
+  |  ("NICE HIT!" or   |                            |             |
+  |   "MISSED!", 800ms)|                            |             |
+  +-------------------+                             |             |
+         |                                          |             |
+         | (800ms elapsed)                          |             |
+         v                                          |             |
+   [lives > 0?] ---- YES ---> setupRound() ---------+             |
+         |                                                        |
+         NO                                                       |
+         |                                                        |
+         v                                                        |
+  +-------------+                                                 |
+  | GAME OVER   |                                                 |
+  | SCREEN      |-------------------------------------------------+
+  +-------------+    (button pressed -> resetGame())
+
+================================================================================
+7. KEY TECHNICAL CONCEPTS DEMONSTRATED
+================================================================================
+
+1. EDGE DETECTION INPUT HANDLING
+   Unlike Flappy Bird's continuous "is pressed" check, this game uses 
+   proper edge detection (currentButtonState == HIGH && lastButtonState 
+   == LOW) to register exactly ONE action per physical button press, 
+   regardless of how long the button is held down.
+
+2. ROUND-BASED / TURN-BASED GAME STRUCTURE
+   Unlike the continuous real-time gameplay of Flappy Bird, this game 
+   uses a distinct ROUND -> RESULT -> NEXT ROUND cycle, demonstrating a 
+   different game architecture pattern useful for many other game types 
+   (quiz games, puzzle games, etc.)
+
+3. TIMED STATE TRANSITIONS USING millis()
+   The showResult state uses millis() - resultTime > 800 to create a 
+   non-blocking 800ms pause, allowing the display to show feedback text 
+   without freezing the whole program (avoiding delay(800) which would 
+   block button reads).
+
+4. DISTANCE-BASED SCORING ALGORITHM
+   Score is not simply pass/fail - it's calculated based on proximity 
+   to the zone's center, rewarding precision over just "good enough" 
+   accuracy. This teaches a more nuanced scoring system design.
+
+5. LIVES SYSTEM VS. INSTANT GAME OVER
+   Unlike Flappy Bird (single mistake = game over), this game allows 
+   multiple mistakes (3 lives) before ending, demonstrating a different 
+   difficulty/forgiveness balance suitable for precision-based games.
+
+6. STREAK/COMBO TRACKING WITH PERSISTENT BEST RECORD
+   Two related but distinct variables (streak vs bestStreak) demonstrate 
+   how to track both a "current run" value that resets on failure, and 
+   an "all-time best" value that persists across resets within a session.
+
+7. DIFFICULTY SCALING TIED TO SKILL (STREAK) RATHER THAN TIME/SCORE
+   Difficulty increases based on consecutive successes (streak % 5) 
+   rather than total score or elapsed time, meaning skilled players who 
+   maintain streaks face harder challenges faster, while players who 
+   miss often stay at an easier difficulty for longer - a form of 
+   dynamic difficulty adjustment.
+
+================================================================================
+8. CUSTOMIZATION GUIDE
+================================================================================
+
+WANT TO...                          | CHANGE THIS VARIABLE/VALUE
+-------------------------------------|------------------------------------------
+Make the bar move slower/faster      | barSpeed = 2  ->  try 1 (slower/easier) 
+                                      | or 4 (faster/harder)
+Start with a wider/easier zone       | zoneWidth = 25  ->  try 35 or 40
+Change minimum zone size             | if (zoneWidth > 10)  ->  change 10 to 
+                                      | a different minimum floor value
+Change difficulty ramp-up rate       | if (streak % 5 == 0)  ->  change 5 to 
+                                      | 10 for slower difficulty progression
+Give more/fewer lives                | lives = 3  ->  change in BOTH the 
+                                      | global variable default AND inside 
+                                      | resetGame()
+Change result display duration       | millis() - resultTime > 800  ->  
+                                      | change 800 to a different millisecond 
+                                      | value (e.g., 500 for faster pacing)
+Change scoring formula               | points = max(1, 10 - distFromCenter)  
+                                      | -> adjust the base value (10) or 
+                                      | minimum guaranteed points (1)
+Change starting zone position range  | random(20, 128 - zoneWidth - 20)  ->  
+                                      | adjust the margin values (20) to 
+                                      | allow zone closer to screen edges
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+ISSUE: Multiple hits register from a single button press
+FIX: This should NOT happen due to edge detection, but if it does, 
+     verify that lastButtonState = currentButtonState; at the end of 
+     updateGame() is executing every frame without being skipped by an 
+     early return or conditional block.
+
+ISSUE: Button press does nothing during gameplay
+FIX: Check your button wiring polarity. If using a Normally Open button 
+     with INPUT_PULLUP, a press should read LOW normally, but this code 
+     checks for HIGH. Try changing "currentButtonState == HIGH" and 
+     "lastButtonState == LOW" (and vice versa) to match your specific 
+     wiring, OR simply swap the initial value of lastButtonState 
+     accordingly.
+
+ISSUE: Bar movement looks jumpy or inconsistent
+FIX: Adjust the delay(20) value in loop() - this controls how often 
+     the bar position updates. Smaller delay = smoother/faster movement.
+
+ISSUE: Target zone sometimes appears partially off-screen
+FIX: Check the random(20, 128 - zoneWidth - 20) range in setupRound(). 
+     If zoneWidth becomes very small due to difficulty scaling, ensure 
+     this formula still produces valid on-screen positions (shouldn't 
+     be an issue with default values, but worth checking if you modify 
+     zoneWidth's minimum floor).
+
+ISSUE: Game feels too easy or too hard overall
+FIX: The three main difficulty levers are: barSpeed (movement speed), 
+     zoneWidth (target size), and the streak-based ramp-up interval 
+     (currently every 5 hits). Adjust these together for balanced 
+     difficulty tuning.
+
+================================================================================
+10. CODE STATISTICS
+================================================================================
+
+Total Lines of Code    : ~180
+Functions              : 8 (setup, setupRound, loop, updateGame, 
+                          checkResult, drawGame, drawStartScreen, 
+                          drawGameOver, resetGame)
+Global Variables        : ~18
+Arrays Used             : 0 (this game uses simple scalar variables only, 
+                          unlike Flappy Bird's array-based pipe management)
+Libraries Required      : 4 (SPI, Wire, Adafruit_GFX, Adafruit_SH110X)
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
