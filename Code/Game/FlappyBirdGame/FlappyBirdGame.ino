@@ -33,12 +33,80 @@ const int buttonPin = 2;
 unsigned long lastFlapTime = 0;
 bool flapFrame = false;  // for bird animation
 
+// =====================================================
+// GAMECRAFT SPLASH SCREEN FUNCTION (add this new function 
+// anywhere in the file, e.g., right after setup())
+// =====================================================
+void drawGameCraftLogo() {
+  display.clearDisplay();
+
+  // ---------------------------------------------------
+  // 1. PIXELATED CONTROLLER ICON (D-pad style, centered top)
+  // ---------------------------------------------------
+  int iconX = 44;
+  int iconY = 2;
+  int blockSize = 4;
+
+  display.fillRect(iconX + blockSize, iconY, blockSize, blockSize, SH110X_WHITE);
+  display.fillRect(iconX, iconY + blockSize, blockSize, blockSize, SH110X_WHITE);
+  display.fillRect(iconX + blockSize, iconY + blockSize, blockSize, blockSize, SH110X_WHITE);
+  display.fillRect(iconX + blockSize * 2, iconY + blockSize, blockSize, blockSize, SH110X_WHITE);
+  display.fillRect(iconX + blockSize, iconY + blockSize * 2, blockSize, blockSize, SH110X_WHITE);
+
+  display.drawPixel(iconX + blockSize + 1, iconY + blockSize + 1, SH110X_BLACK);
+  display.drawPixel(iconX + blockSize + 2, iconY + blockSize + 1, SH110X_BLACK);
+  display.drawPixel(iconX + blockSize + 1, iconY + blockSize + 2, SH110X_BLACK);
+  display.drawPixel(iconX + blockSize + 2, iconY + blockSize + 2, SH110X_BLACK);
+
+  display.fillCircle(iconX + 22, iconY + 6, 2, SH110X_WHITE);
+  display.fillCircle(iconX + 30, iconY + 6, 2, SH110X_WHITE);
+
+  // ---------------------------------------------------
+  // 2. MAIN TITLE TEXT - "GameCraft"
+  // ---------------------------------------------------
+  display.setTextSize(2);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(10, 24);
+  display.print("GameCraft");
+
+  // ---------------------------------------------------
+  // 3. TAGLINE
+  // ---------------------------------------------------
+  display.setTextSize(1);
+  display.setCursor(10, 45);
+  display.print("BUILD.PLAY.LEARN.");
+
+  // ---------------------------------------------------
+  // 4. DECORATIVE PIXEL DOTS
+  // ---------------------------------------------------
+  int dotSize = 3;
+  int dotY = 57;
+
+  display.fillRect(8, dotY, dotSize, dotSize, SH110X_WHITE);
+  display.fillRect(14, dotY, dotSize, dotSize, SH110X_WHITE);
+  display.fillRect(20, dotY, dotSize, dotSize, SH110X_WHITE);
+
+  display.fillRect(105, dotY, dotSize, dotSize, SH110X_WHITE);
+  display.fillRect(111, dotY, dotSize, dotSize, SH110X_WHITE);
+  display.fillRect(117, dotY, dotSize, dotSize, SH110X_WHITE);
+}
+
 void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
   display.begin(0, true);
   display.clearDisplay();
   display.display();
 
+  // ---------------------------------------------------
+  // SHOW GAMECRAFT SPLASH SCREEN
+  // ---------------------------------------------------
+  drawGameCraftLogo();
+  display.display();
+  delay(2500); // Show logo for 2.5 seconds
+
+  // ---------------------------------------------------
+  // EXISTING GAME SETUP (unchanged)
+  // ---------------------------------------------------
   randomSeed(analogRead(0));
   for (int i = 0; i < 3; i++) {
     pipeX[i] = 128 + i * 50;
@@ -209,4 +277,3 @@ void resetGame() {
   }
   coinActive = false;
 }
-
