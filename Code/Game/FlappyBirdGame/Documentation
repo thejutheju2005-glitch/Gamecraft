@@ -1,0 +1,485 @@
+================================================================================
+                         GAMECRAFT - GAME DOCUMENTATION
+                              GAME 1: FLAPPY BIRD
+================================================================================
+
+DOCUMENT VERSION: 1.0
+LAST UPDATED: 2025
+GAME FILE: FlappyBird.ino
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+Flappy Bird is a single-button arcade game where the player controls a bird 
+that must fly through a series of moving pipes without colliding with them. 
+The game increases in difficulty over time by speeding up and shrinking the 
+gap between pipes. A bonus coin system rewards skilled players with extra 
+points.
+
+GAME GENRE     : Arcade / Endless Runner
+CONTROL SCHEME : Single Button (Tap to Flap/Jump)
+DIFFICULTY     : Progressive (increases every 5 points)
+DISPLAY        : 128x64 OLED (SH1106 driver, SPI interface)
+MICROCONTROLLER: Arduino Nano
+
+--------------------------------------------------------------------------------
+HOW TO PLAY
+--------------------------------------------------------------------------------
+1. Power on the device - Start Screen appears showing "FLAPPY BIRD"
+2. Press the button to begin the game
+3. Tap the button repeatedly to make the bird "flap" upward
+4. Gravity constantly pulls the bird down - timing your taps controls altitude
+5. Navigate through the gaps between pipes without touching them
+6. Collect bonus coins (small circles) for +3 extra points
+7. Colliding with a pipe or screen edge ends the game
+8. Press the button again on the Game Over screen to restart
+
+================================================================================
+2. HARDWARE REQUIREMENTS
+================================================================================
+
+COMPONENT                  | QUANTITY | NOTES
+----------------------------|----------|---------------------------------------
+Arduino Nano                | 1        | Main microcontroller
+OLED Display 128x64 (SH1106)| 1        | SPI interface (7-pin version)
+Push Button                 | 1        | Momentary, normally open recommended
+4x AA Battery Holder         | 1        | Power supply (6V, regulated via Nano's
+                             |          | onboard regulator, or use external
+                             |          | 5V regulator for stability)
+Jumper Wires                | ~10      | For connections
+Breadboard or Custom PCB    | 1        | For prototyping/final build
+10k Ohm Resistor (optional) | 1        | Only needed if NOT using INPUT_PULLUP
+
+--------------------------------------------------------------------------------
+WIRING / PIN CONNECTIONS
+--------------------------------------------------------------------------------
+
+OLED DISPLAY (SPI MODE):
+    OLED Pin        Arduino Nano Pin
+    -----------------------------------
+    MOSI (SDA)  ->  D10
+    CLK (SCK)   ->  D8
+    DC          ->  D7
+    CS          ->  D5
+    RST         ->  D9
+    VCC         ->  5V (or 3.3V depending on your module)
+    GND         ->  GND
+
+PUSH BUTTON:
+    Button Pin 1  ->  D2 (Arduino)
+    Button Pin 2  ->  GND
+    
+    NOTE: Code uses INPUT_PULLUP mode, meaning the pin is internally 
+    pulled HIGH. When the button is pressed (connecting pin to GND), 
+    the reading changes. 
+    
+    IMPORTANT: In this code, digitalRead(buttonPin) == HIGH is used 
+    to detect a "pressed" state. Depending on your specific button 
+    wiring (Normally Open vs Normally Closed), you may need to change 
+    this comparison to LOW instead. This is noted directly in the code 
+    comments at each digitalRead() call.
+
+POWER:
+    4x AA Battery Pack (6V) -> Arduino Nano VIN pin, GND -> GND
+    (Alternative: USB power during development/testing)
+
+================================================================================
+3. REQUIRED LIBRARIES
+================================================================================
+
+Install these via Arduino IDE Library Manager (Sketch > Include Library > 
+Manage Libraries):
+
+1. Adafruit GFX Library
+   - Provides core graphics functions (shapes, text rendering)
+   - Author: Adafruit
+
+2. Adafruit SH110X Library
+   - Driver specifically for SH1106/SH1107 OLED displays
+   - Author: Adafruit
+
+3. SPI Library (built-in, no installation needed)
+   - Handles SPI communication protocol
+
+4. Wire Library (built-in, no installation needed)
+   - Included for I2C compatibility (not actively used in SPI mode, but 
+     required by the Adafruit library dependencies)
+
+================================================================================
+4. GLOBAL VARIABLES REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+DISPLAY OBJECT
+--------------------------------------------------------------------------------
+Adafruit_SH1106G display
+    The main display object used to draw all graphics. Initialized with 
+    screen dimensions (128x64) and the SPI pin mapping defined above.
+
+--------------------------------------------------------------------------------
+BIRD (PLAYER) VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE | DEFAULT | DESCRIPTION
+--------------|------|---------|----------------------------------------------
+birdY         | int  | 32      | Bird's vertical position (Y-coordinate). 
+              |      |         | X-position is fixed at 10 (bird doesn't move
+              |      |         | horizontally; pipes move instead)
+velocity      | int  | 0       | Current vertical speed of the bird. Positive 
+              |      |         | = falling, Negative = rising
+gravity       | int  | 1       | Constant downward acceleration applied every 
+              |      |         | frame
+jump          | int  | -4      | The velocity instantly set when button is 
+              |      |         | pressed (negative = upward)
+flapFrame     | bool | false   | Toggles wing animation frame (true/false)
+lastFlapTime  | ulong| 0       | Stores millis() timestamp for animation timing
+
+--------------------------------------------------------------------------------
+PIPE (OBSTACLE) VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE     | SIZE | DESCRIPTION
+--------------|----------|------|------------------------------------------
+pipeX[]       | int      | 3    | X-position of each of the 3 simultaneous 
+              |          |      | pipes on screen
+gapYArr[]     | int      | 3    | Y-position of the TOP of the gap for each 
+              |          |      | pipe (the opening the bird must fly through)
+pipeDir[]     | int      | 3    | Direction (+1 or -1) that each pipe's gap 
+              |          |      | is currently moving (creates the "moving 
+              |          |      | gap" twist feature)
+gapHeight     | int      | -    | Height of the gap opening (starts at 20px, 
+              |          |      | shrinks as difficulty increases, min 10px)
+
+--------------------------------------------------------------------------------
+COIN (BONUS) VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE | DEFAULT | DESCRIPTION
+--------------|------|---------|----------------------------------------------
+coinX         | int  | -20     | X-position of bonus coin (-20 = off-screen/
+              |      |         | inactive starting position)
+coinY         | int  | 0       | Y-position of bonus coin
+coinActive    | bool | false   | Whether a coin is currently on screen
+
+--------------------------------------------------------------------------------
+GAME STATE VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE      | TYPE | DEFAULT | DESCRIPTION
+--------------|------|---------|----------------------------------------------
+score         | int  | 0       | Player's current score (+1 per pipe passed, 
+              |      |         | +3 per coin collected)
+level         | int  | 1       | Current difficulty level (increases every 
+              |      |         | 5 points)
+speed         | int  | 2       | Horizontal scroll speed of pipes (increases 
+              |      |         | with level)
+gameOver      | bool | false   | True when bird has collided with something
+gameStarted   | bool | false   | True once player presses button on start 
+              |      |         | screen
+
+--------------------------------------------------------------------------------
+HARDWARE CONSTANT
+--------------------------------------------------------------------------------
+buttonPin     | const int | 2  | Digital pin connected to the push button
+
+================================================================================
+5. FUNCTION-BY-FUNCTION BREAKDOWN
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 void setup()
+--------------------------------------------------------------------------------
+PURPOSE: Runs once at power-on. Initializes hardware and starting game state.
+
+WHAT IT DOES:
+  1. Sets buttonPin as INPUT_PULLUP (internal resistor enabled, pin reads 
+     HIGH by default, changes when button pressed)
+  2. Initializes the OLED display (display.begin(0, true))
+  3. Clears the display buffer and pushes a blank screen
+  4. Seeds the random number generator using noise from analog pin A0 
+     (ensures different pipe patterns each power-on)
+  5. Initializes the 3 pipes:
+     - Spaced 50 pixels apart horizontally (pipeX[i] = 128 + i * 50)
+     - Random initial gap position (between Y=10 and Y=44)
+     - Random initial movement direction for the "moving gap" effect
+
+--------------------------------------------------------------------------------
+5.2 void loop()
+--------------------------------------------------------------------------------
+PURPOSE: Main game state machine. Runs continuously, forever.
+
+LOGIC FLOW:
+  IF game has not started:
+      -> Show start screen
+      -> Check for button press to begin game
+  ELSE IF game is running (not game over):
+      -> Update game logic (physics, collisions, scoring)
+      -> Draw current frame
+      -> Wait 30ms (controls game speed/framerate)
+  ELSE (game over):
+      -> Show game over screen with final score
+      -> Check for button press to reset and play again
+
+--------------------------------------------------------------------------------
+5.3 void drawBird(int x, int y)
+--------------------------------------------------------------------------------
+PURPOSE: Draws the bird character at given coordinates using layered shapes.
+
+VISUAL BREAKDOWN:
+  - Body : A filled circle, radius 3px, centered at (x, y)
+  - Beak : A small filled triangle pointing right (in front of the body)
+  - Eye  : A tiny filled circle drawn in BLACK on top of the body (creates 
+           a "cutout" effect since OLED is monochrome)
+  - Wing : An animated triangle that alternates between two positions 
+           based on the flapFrame boolean, creating a simple flapping 
+           animation effect
+
+NOTE: This function is called every frame from drawGame(), always using 
+the bird's CURRENT birdY position but a FIXED X position of 10.
+
+--------------------------------------------------------------------------------
+5.4 void updateGame()
+--------------------------------------------------------------------------------
+PURPOSE: The core game logic function. Handles physics, input, pipe 
+movement, coin logic, animation timing, and collision detection. Called 
+once per frame from loop().
+
+SECTION-BY-SECTION BREAKDOWN:
+
+  A) BIRD MOVEMENT (Physics)
+     - Reads button state; if pressed, sets velocity = jump (-4), giving 
+       an instant upward impulse
+     - Adds gravity (+1) to velocity every frame regardless of input 
+       (simulates constant downward pull)
+     - Updates birdY by adding velocity (birdY += velocity)
+     
+     RESULT: Pressing the button repeatedly keeps the bird aloft; 
+     releasing it causes the bird to fall due to accumulating gravity.
+
+  B) PIPE MOVEMENT & MOVING GAPS (for-loop over 3 pipes)
+     - Each pipe moves left by 'speed' pixels per frame (pipeX[i] -= speed)
+     - Each pipe's gap position oscillates up/down by pipeDir[i] pixels 
+       per frame, bouncing between Y=10 and Y=44 (this creates the 
+       "moving gap" difficulty twist not found in the original Flappy Bird)
+     - When a pipe moves fully off-screen (pipeX[i] < -10):
+         - It resets to X=128 (right edge, off-screen)
+         - Gets a new random gap position and direction
+         - Score increments by 1
+         - Every 5 points: level increases, speed increases, and 
+           gapHeight decreases (down to a minimum of 10px) - this is 
+           the PROGRESSIVE DIFFICULTY system
+
+  C) BONUS COIN LOGIC
+     - Each frame, if no coin is currently active, there's a 2% random 
+       chance a new coin spawns at the right edge (X=128) with a random 
+       Y position between 10-54
+     - Active coins move left at the same speed as pipes
+     - If a coin moves off the left edge (X < -5), it deactivates
+     - Collision check: if the coin is within 5px (both X and Y) of the 
+       bird's position, the coin is collected: +3 score, coin deactivates
+
+  D) BIRD ANIMATION TIMING
+     - Uses millis() (not delay()) to toggle flapFrame every 100ms
+     - This non-blocking timing technique allows animation to update 
+       independently of the main game loop's delay(30), keeping wing 
+       flap speed consistent regardless of game speed changes
+
+  E) COLLISION DETECTION
+     - For each of the 3 pipes: if the pipe is horizontally aligned with 
+       the bird (pipeX[i] between 0 and 14, since bird is at X=10 with 
+       some width) AND the bird's Y position is outside the gap 
+       (birdY < gapYArr[i] OR birdY > gapYArr[i] + gapHeight), then 
+       gameOver = true
+     - Additionally, if the bird goes above the screen (birdY < 0) or 
+       below the screen (birdY > 64), gameOver = true (prevents bird 
+       from flying off-screen indefinitely)
+
+--------------------------------------------------------------------------------
+5.5 void drawGame()
+--------------------------------------------------------------------------------
+PURPOSE: Renders the current frame to the OLED display. Called once per 
+frame from loop(), immediately after updateGame().
+
+DRAWING ORDER:
+  1. Clear the display buffer (display.clearDisplay())
+  2. Draw the bird at fixed X=10, current birdY (calls drawBird())
+  3. Draw all 3 pipes:
+     - Top portion: filled rectangle from Y=0 to Y=gapYArr[i]
+     - Bottom portion: filled rectangle from Y=(gapYArr[i]+gapHeight) 
+       to Y=64
+     - This creates the "gap" visual effect - two solid blocks with an 
+       empty space between them
+  4. Draw the bonus coin (if active) as a hollow circle
+  5. Draw HUD text:
+     - "S:" (Score) at top-right area, position (90, 0)
+     - "L:" (Level) below it, position (90, 10)
+  6. Push everything to the physical screen (display.display())
+
+--------------------------------------------------------------------------------
+5.6 void drawStartScreen()
+--------------------------------------------------------------------------------
+PURPOSE: Displays the title screen shown before the game begins.
+
+CONTENT SHOWN:
+  - "FLAPPY BIRD" title text at (30, 20)
+  - "Press Button to" instruction at (20, 40)
+  - "Start" at (45, 50)
+
+--------------------------------------------------------------------------------
+5.7 void drawGameOver()
+--------------------------------------------------------------------------------
+PURPOSE: Displays the game over screen after a collision.
+
+CONTENT SHOWN:
+  - "GAME OVER" text at (30, 20)
+  - "Score: [final score]" at (30, 40)
+
+--------------------------------------------------------------------------------
+5.8 void resetGame()
+--------------------------------------------------------------------------------
+PURPOSE: Resets all game variables to their initial state, allowing the 
+player to start a new game after Game Over.
+
+RESET ACTIONS:
+  - birdY back to 32 (center)
+  - velocity back to 0
+  - score back to 0
+  - level back to 1
+  - speed back to 2
+  - gapHeight back to 20 (undoes difficulty progression)
+  - gameOver set to false
+  - gameStarted set to false (returns to start screen, not directly 
+    into gameplay)
+  - All 3 pipes re-initialized with fresh positions and random gaps
+  - coinActive set to false
+
+================================================================================
+6. GAME STATE FLOW DIAGRAM
+================================================================================
+
+    [POWER ON]
+         |
+         v
+  +-------------+
+  | START SCREEN|  <-------------------------+
+  | (gameStarted|                            |
+  |  = false)   |                            |
+  +-------------+                            |
+         |                                   |
+         | (button pressed)                  |
+         v                                   |
+  +-------------+                            |
+  |   PLAYING   |                            |
+  | (gameStarted|                            |
+  |  = true,    |                            |
+  |  gameOver   |                            |
+  |  = false)   |                            |
+  +-------------+                            |
+         |                                   |
+         | (collision detected)              |
+         v                                   |
+  +-------------+                            |
+  | GAME OVER   |                            |
+  | SCREEN      | ---------------------------+
+  | (gameOver   |    (button pressed ->
+  |  = true)    |     resetGame() called)
+  +-------------+
+
+================================================================================
+7. KEY TECHNICAL CONCEPTS DEMONSTRATED
+================================================================================
+
+1. GAME LOOP PATTERN
+   Clear -> Update -> Draw -> Display -> Delay (repeated every frame)
+
+2. NON-BLOCKING ANIMATION TIMING
+   Using millis() instead of delay() for the wing-flap animation allows 
+   it to run independently of the main loop's frame delay.
+
+3. ARRAY-BASED OBJECT MANAGEMENT
+   Managing 3 pipes simultaneously using arrays (pipeX[], gapYArr[], 
+   pipeDir[]) instead of writing repetitive code for each pipe.
+
+4. PROCEDURAL SPRITE DRAWING
+   The bird is not an image/bitmap - it's built from primitive shapes 
+   (circle + triangle + circle) layered together, including using 
+   BLACK color to create a "cutout" eye effect.
+
+5. PROGRESSIVE DIFFICULTY SCALING
+   Speed increases and gap size decreases automatically as the score 
+   milestone (every 5 points) is reached, keeping the game engaging.
+
+6. BASIC AABB (Axis-Aligned Bounding Box) COLLISION DETECTION
+   Simplified collision logic checking X-range overlap and Y-range 
+   validity for pipe collisions.
+
+7. STATE MACHINE ARCHITECTURE
+   Three distinct states (Start Screen, Playing, Game Over) controlled 
+   by boolean flags (gameStarted, gameOver), managed centrally in loop().
+
+================================================================================
+8. CUSTOMIZATION GUIDE
+================================================================================
+
+WANT TO...                          | CHANGE THIS VARIABLE/VALUE
+-------------------------------------|------------------------------------------
+Make the bird jump higher            | jump = -4  ->  try -6 or -8
+Make gravity feel floatier           | gravity = 1  ->  try 0 (careful: may 
+                                      | never fall) - keep as small positive int
+Start with a wider/easier gap        | gapHeight = 20  ->  try 30
+Change difficulty ramp-up rate       | if (score % 5 == 0)  ->  change 5 to 
+                                      | 10 for slower difficulty progression
+Change starting pipe speed           | speed = 2  ->  try 1 for easier start
+Increase/decrease coin spawn rate    | random(0, 100) < 2  ->  change 2 to 
+                                      | higher number for more frequent coins
+Change coin bonus value              | score += 3  ->  change to any value
+Add a 4th pipe                       | Change array sizes from [3] to [4] 
+                                      | in pipeX[], gapYArr[], pipeDir[], and 
+                                      | update all "for (int i = 0; i < 3..." 
+                                      | loops to "i < 4"
+Change bird's horizontal position    | Currently hardcoded as 10 in 
+                                      | drawBird(10, birdY) and collision 
+                                      | check (pipeX[i] < 14) - change both 
+                                      | consistently if modified
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+ISSUE: Button doesn't respond / bird doesn't jump
+FIX: Check the digitalRead(buttonPin) == HIGH comparisons throughout the 
+     code. If your button is wired as Normally Open with INPUT_PULLUP, 
+     a press typically reads LOW, not HIGH. Change all instances of 
+     "== HIGH" to "== LOW" for button detection (comments in the code 
+     mark exactly where these checks occur).
+
+ISSUE: Display shows nothing / blank screen
+FIX: Verify all SPI pin connections match the #define statements at the 
+     top of the code. Also confirm display.begin(0, true) executes 
+     without error - try adding Serial.print() debug statements if unsure.
+
+ISSUE: Bird immediately falls through screen at start
+FIX: Check that birdY is initialized to 32 and gravity/jump values are 
+     reasonable (gravity should be small, e.g., 1; jump should be a 
+     larger negative number, e.g., -4 to -8).
+
+ISSUE: Game runs too fast/slow
+FIX: Adjust the delay(30) value in the loop() function - increase for 
+     slower gameplay, decrease for faster gameplay.
+
+ISSUE: Random pipe patterns are identical every power-on
+FIX: Ensure randomSeed(analogRead(0)) in setup() is reading from an 
+     unconnected analog pin (floating pin gives better randomness). If 
+     A0 is connected to something, try a different unused analog pin.
+
+================================================================================
+10. CODE STATISTICS
+================================================================================
+
+Total Lines of Code    : ~180
+Functions              : 8 (setup, loop, drawBird, updateGame, drawGame, 
+                          drawStartScreen, drawGameOver, resetGame)
+Global Variables        : ~20
+Arrays Used             : 3 (pipeX, gapYArr, pipeDir)
+Libraries Required      : 4 (SPI, Wire, Adafruit_GFX, Adafruit_SH110X)
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
