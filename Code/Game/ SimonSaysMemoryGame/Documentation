@@ -1,0 +1,687 @@
+================================================================================
+                         GAMECRAFT - GAME DOCUMENTATION
+                              GAME 3: MEMORY BEEP
+================================================================================
+
+DOCUMENT VERSION: 1.0
+LAST UPDATED: 2025
+GAME FILE: MemoryBeep.ino
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+Memory Beep is a single-button memory/pattern recall game inspired by the 
+classic "Simon Says" game. Since only one button is available (rather than 
+the traditional 4-color-button setup), this game encodes the pattern using 
+SHORT and LONG button presses instead of different buttons/colors.
+
+The game displays a growing sequence of SHORT and LONG flashes on screen 
+(visualized as differently-sized bars). After watching the full sequence, 
+the player must reproduce it exactly by tapping (short press) or holding 
+(long press) the button in the same order. Each successful round adds one 
+more step to the sequence, increasing the memory challenge.
+
+GAME GENRE     : Memory / Pattern Recall
+CONTROL SCHEME : Single Button (Short Tap = 0, Long Hold = 1)
+DIFFICULTY     : Progressive (sequence grows by 1 each round; level 
+                 increases every 3 sequence steps)
+DISPLAY        : 128x64 OLED (SH1106 driver, SPI interface)
+MICROCONTROLLER: Arduino Nano
+
+--------------------------------------------------------------------------------
+HOW TO PLAY
+--------------------------------------------------------------------------------
+1. Power on the device - Start Screen appears showing "MEMORY BEEP"
+2. Press the button to begin the game
+3. WATCH PHASE: The screen flashes a sequence of bars:
+   - A WIDE bar labeled "LONG" = a long flash
+   - A NARROW bar labeled "SHORT" = a short flash
+   - Watch carefully - the sequence starts with just 1 step and grows 
+     each round
+4. YOUR TURN PHASE: Reproduce the sequence using the button:
+   - Quick tap (release before threshold) = SHORT input
+   - Hold the button down (past the threshold) = LONG input
+   - While holding, a growing bar shows your hold duration in real-time, 
+     with a marker line showing exactly where "short" becomes "long"
+5. If you reproduce the ENTIRE sequence correctly, you advance to the 
+   next round (sequence grows by 1, harder to remember)
+6. If you make ANY mistake, the game ends immediately
+7. Press the button again on the Game Over screen to return to the start 
+   screen and play again
+
+================================================================================
+2. HARDWARE REQUIREMENTS
+================================================================================
+
+COMPONENT                  | QUANTITY | NOTES
+----------------------------|----------|---------------------------------------
+Arduino Nano                | 1        | Main microcontroller
+OLED Display 128x64 (SH1106)| 1        | SPI interface (7-pin version)
+Push Button                 | 1        | Momentary, normally open recommended
+4x AA Battery Holder         | 1        | Power supply
+Jumper Wires                | ~10      | For connections
+Breadboard or Custom PCB    | 1        | For prototyping/final build
+
+--------------------------------------------------------------------------------
+WIRING / PIN CONNECTIONS
+--------------------------------------------------------------------------------
+
+OLED DISPLAY (SPI MODE):
+    OLED Pin        Arduino Nano Pin
+    -----------------------------------
+    MOSI (SDA)  ->  D10
+    CLK (SCK)   ->  D8
+    DC          ->  D7
+    CS          ->  D5
+    RST         ->  D9
+    VCC         ->  5V (or 3.3V depending on your module)
+    GND         ->  GND
+
+PUSH BUTTON:
+    Button Pin 1  ->  D2 (Arduino)
+    Button Pin 2  ->  GND
+    
+    NOTE: This game requires the MOST PRECISE button timing of all 
+    GameCraft games, since it measures exact PRESS DURATION (not just 
+    press/release events) to distinguish SHORT vs LONG input. Ensure 
+    your button has good tactile action without excessive mechanical 
+    bounce, as bounce could slightly affect duration measurements. If 
+    your button reads LOW when pressed (opposite of this code's 
+    assumption), change all "== HIGH" comparisons related to button 
+    reading to "== LOW" throughout handleWaitingInput().
+
+POWER:
+    4x AA Battery Pack (6V) -> Arduino Nano VIN pin, GND -> GND
+
+================================================================================
+3. REQUIRED LIBRARIES
+================================================================================
+
+1. Adafruit GFX Library       - Core graphics functions
+2. Adafruit SH110X Library    - SH1106 OLED driver
+3. SPI Library (built-in)     - SPI communication protocol
+4. Wire Library (built-in)    - Required dependency for Adafruit libraries
+
+================================================================================
+4. GLOBAL VARIABLES REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+DISPLAY OBJECT
+--------------------------------------------------------------------------------
+Adafruit_SH1106G display
+    The main display object used to draw all graphics.
+
+--------------------------------------------------------------------------------
+GAME STATE MACHINE
+--------------------------------------------------------------------------------
+enum GameState { START_SCREEN, SHOWING_SEQUENCE, WAITING_INPUT, 
+                 ROUND_SUCCESS, ROUND_FAIL, GAME_OVER_STATE }
+
+    This game uses a proper C++ ENUM to manage 6 distinct states, unlike 
+    Flappy Bird and Stop The Bar which used simple boolean flags 
+    (gameStarted, gameOver). This is a more scalable pattern for games 
+    with multiple sequential phases.
+
+STATE          | DESCRIPTION
+----------------|---------------------------------------------------------
+START_SCREEN    | Title screen, waiting for player to begin
+SHOWING_SEQUENCE| Displaying the pattern the player must memorize
+WAITING_INPUT   | Player is inputting their answer via short/long presses
+ROUND_SUCCESS   | Brief "SEQUENCE COMPLETE!" display before next round
+ROUND_FAIL      | Brief "WRONG!" display showing the correct expected input
+GAME_OVER_STATE | Final results screen, waiting for restart
+
+VARIABLE     | TYPE      | DEFAULT     | DESCRIPTION
+-------------|-----------|-------------|------------------------------------
+state        | GameState | START_SCREEN| Tracks which of the 6 states the 
+             |           |             | game is currently in
+
+--------------------------------------------------------------------------------
+SEQUENCE DATA
+--------------------------------------------------------------------------------
+VARIABLE        | TYPE | SIZE/DEFAULT | DESCRIPTION
+-----------------|------|--------------|----------------------------------
+MAX_SEQUENCE     | #define | 50        | Maximum possible sequence length 
+                 |         |           | (array size limit)
+sequence[]       | int  | [50]         | Array storing the full pre-generated 
+                 |      |              | pattern (0 = short, 1 = long). Only 
+                 |      |              | the first 'sequenceLength' elements 
+                 |      |              | are actually used/shown at any 
+                 |      |              | given time.
+sequenceLength   | int  | 1            | How many steps of the sequence are 
+                 |      |              | currently active (grows by 1 each 
+                 |      |              | successful round)
+showIndex        | int  | 0            | Which step of the sequence is 
+                 |      |              | CURRENTLY being displayed during 
+                 |      |              | the SHOWING_SEQUENCE state
+inputIndex       | int  | 0            | Which step of the sequence the 
+                 |      |              | player is CURRENTLY expected to 
+                 |      |              | input during WAITING_INPUT state
+
+--------------------------------------------------------------------------------
+SCORING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE   | TYPE | DEFAULT | DESCRIPTION
+-----------|------|---------|--------------------------------------------------
+score      | int  | 0       | Cumulative score, increases by 'level' amount 
+           |      |         | each completed round
+level      | int  | 1       | Current difficulty level, increases every 3 
+           |      |         | sequence steps completed
+bestScore  | int  | 0       | Highest score achieved this session (persists 
+           |      |         | across game restarts until power-off)
+
+--------------------------------------------------------------------------------
+TIMING CONSTANTS
+--------------------------------------------------------------------------------
+CONSTANT              | VALUE | DESCRIPTION
+-----------------------|-------|------------------------------------------------
+SHORT_DURATION         | 300ms | How long a "SHORT" flash is displayed on 
+                       |       | screen during the watch phase
+LONG_DURATION          | 700ms | How long a "LONG" flash is displayed on 
+                       |       | screen during the watch phase
+GAP_DURATION           | 300ms | Blank pause between each flash in the 
+                       |       | sequence (prevents flashes blurring together)
+LONG_PRESS_THRESHOLD   | 400ms | The exact duration boundary - if the player 
+                       |       | holds the button for 400ms or longer, it 
+                       |       | counts as a LONG input; shorter counts as 
+                       |       | SHORT
+
+--------------------------------------------------------------------------------
+STATE TIMING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE     | TYPE  | DEFAULT | DESCRIPTION
+-------------|-------|---------|--------------------------------------------
+stateTimer   | ulong | 0       | General-purpose timestamp used differently 
+             |       |         | depending on current state (tracks flash 
+             |       |         | timing, result display duration, etc.)
+flashOn      | bool  | false   | Whether the current sequence flash is 
+             |       |         | currently in its "ON" (visible) phase or 
+             |       |         | its "OFF" (gap) phase
+
+--------------------------------------------------------------------------------
+BUTTON INPUT TRACKING VARIABLES
+--------------------------------------------------------------------------------
+VARIABLE         | TYPE  | DEFAULT | DESCRIPTION
+-----------------|-------|---------|----------------------------------------
+buttonWasPressed | bool  | false   | Tracks whether button was in "pressed" 
+                 |       |         | state during the previous check (used 
+                 |       |         | for press/release edge detection)
+pressStartTime   | ulong | 0       | Timestamp (millis()) recorded the 
+                 |       |         | moment the button was pressed down, 
+                 |       |         | used to calculate total hold duration 
+                 |       |         | upon release
+
+--------------------------------------------------------------------------------
+HARDWARE CONSTANT
+--------------------------------------------------------------------------------
+buttonPin     | const int | 2  | Digital pin connected to the push button
+
+================================================================================
+5. FUNCTION-BY-FUNCTION BREAKDOWN
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 void setup()
+--------------------------------------------------------------------------------
+PURPOSE: Runs once at power-on. Initializes hardware and pre-generates 
+the maximum possible sequence.
+
+WHAT IT DOES:
+  1. Sets buttonPin as INPUT_PULLUP
+  2. Initializes the OLED display
+  3. Clears the display buffer
+  4. Seeds the random number generator using analogRead(0)
+  5. Calls generateSequence() to fill the ENTIRE 50-element sequence 
+     array with random 0s and 1s upfront (even though early rounds only 
+     use the first 1-3 elements)
+
+--------------------------------------------------------------------------------
+5.2 void generateSequence()
+--------------------------------------------------------------------------------
+PURPOSE: Fills the sequence[] array with random binary values (0 or 1).
+
+WHY GENERATE THE FULL 50-ELEMENT ARRAY UPFRONT?
+  This design choice ensures the ENTIRE sequence for a full game session 
+  is decided at the start, rather than generating new random values as 
+  the player progresses. This means the sequence is fixed and consistent 
+  once generated - important because in SHOWING_SEQUENCE state, the game 
+  replays the FULL sequence from index 0 every round (not just the new 
+  step), so the earlier steps must remain unchanged.
+
+--------------------------------------------------------------------------------
+5.3 void loop()
+--------------------------------------------------------------------------------
+PURPOSE: Main game state machine using a SWITCH statement (different from 
+the if/else if structure used in Flappy Bird and Stop The Bar).
+
+STRUCTURE:
+  switch(state) {
+    case START_SCREEN:       -> show title, wait for press to start
+    case SHOWING_SEQUENCE:   -> call handleShowingSequence()
+    case WAITING_INPUT:      -> call handleWaitingInput()
+    case ROUND_SUCCESS:      -> show success message, then advance after 1000ms
+    case ROUND_FAIL:         -> show failure message, then move to game over 
+                                after 1500ms
+    case GAME_OVER_STATE:    -> show final score, wait for press to restart
+  }
+
+NOTE: This switch-based state machine is a more formal/scalable pattern 
+compared to the boolean-flag approach in earlier games, and is generally 
+preferred when a game has more than 2-3 distinct states.
+
+--------------------------------------------------------------------------------
+5.4 void startNewGame()
+--------------------------------------------------------------------------------
+PURPOSE: Resets all game variables and begins a fresh game session.
+
+WHAT IT DOES:
+  1. sequenceLength = 1 (start with just 1 step to memorize)
+  2. score = 0, level = 1
+  3. showIndex = 0, inputIndex = 0
+  4. generateSequence() called AGAIN (fresh random pattern each new game)
+  5. state = SHOWING_SEQUENCE (begin showing the pattern immediately)
+  6. stateTimer = millis() (start timing for the first flash)
+  7. flashOn = false (ensures first flash starts fresh)
+
+--------------------------------------------------------------------------------
+5.5 void handleShowingSequence()
+--------------------------------------------------------------------------------
+PURPOSE: Manages the "watch the pattern" phase - displays each element of 
+the sequence in order, with proper timing for flash-on, flash-off (gap), 
+and advancing to the next element.
+
+THIS IS A NON-BLOCKING TIMED ANIMATION using millis() - similar in 
+concept to Flappy Bird's wing-flap timer, but more complex since it has 
+THREE distinct timing phases per flash: ON, GAP, then ADVANCE.
+
+LOGIC BREAKDOWN:
+
+  A) DETERMINE CURRENT FLASH DURATION
+     int currentDuration = sequence[showIndex] == 1 ? LONG_DURATION : SHORT_DURATION;
+     Looks up whether the CURRENT step in the sequence is a 0 (short) or 
+     1 (long), and selects the appropriate display duration (300ms or 700ms).
+
+  B) IF FLASH HASN'T STARTED YET (flashOn == false):
+     - Sets flashOn = true
+     - Resets stateTimer = millis() (starts the clock for this flash)
+     - Draws the flash immediately (drawFlash(..., true))
+
+  C) IF FLASH IS ALREADY ON (flashOn == true), CHECK ELAPSED TIME:
+     - IF elapsed < currentDuration:
+         Still within the "ON" phase - keep redrawing the flash (drawFlash 
+         with on=true). Note: redrawing every loop iteration during this 
+         phase is slightly inefficient but harmless for OLED displays at 
+         this scale.
+     - ELSE IF elapsed < currentDuration + GAP_DURATION:
+         Now in the "GAP" phase - draw blank/off screen (drawFlash with 
+         on=false), creating a visible pause between flashes so 
+         consecutive same-type flashes don't blur together visually.
+     - ELSE (both ON and GAP phases have elapsed):
+         Move to the NEXT element: showIndex++, reset flashOn = false, 
+         reset stateTimer = millis()
+         
+         IF showIndex has reached sequenceLength (all elements shown):
+           - inputIndex = 0 (prepare to receive player's first input)
+           - state = WAITING_INPUT (switch to input-receiving state)
+           - drawWaitingScreen() called immediately to show "YOUR TURN!"
+
+--------------------------------------------------------------------------------
+5.6 void handleWaitingInput()
+--------------------------------------------------------------------------------
+PURPOSE: Manages the "player reproduces the pattern" phase - detects 
+button press/release cycles, measures hold duration, classifies each 
+input as SHORT or LONG, and compares against the expected sequence.
+
+LOGIC BREAKDOWN:
+
+  A) READ CURRENT BUTTON STATE
+     bool currentlyPressed = (digitalRead(buttonPin) == HIGH);
+
+  B) DETECT PRESS START (button just went from not-pressed to pressed):
+     if (currentlyPressed && !buttonWasPressed) {
+       pressStartTime = millis();  // start timing this press
+       buttonWasPressed = true;
+     }
+
+  C) DETECT RELEASE (button just went from pressed to not-pressed):
+     if (!currentlyPressed && buttonWasPressed) {
+       - Calculate pressDuration = millis() - pressStartTime
+       - buttonWasPressed = false (reset for next press cycle)
+       - Classify input: 
+           playerInput = (pressDuration >= LONG_PRESS_THRESHOLD) ? 1 : 0
+       - COMPARE against expected value: sequence[inputIndex]
+       
+       IF MATCH (correct input):
+         - inputIndex++ (move to next expected step)
+         - drawCorrectFeedback() shows brief "GOOD!" message (uses a 
+           blocking delay(300) here - a deliberate exception to the 
+           non-blocking pattern used elsewhere, acceptable since it's 
+           very brief and provides important player feedback)
+         - IF inputIndex has reached sequenceLength (all steps correctly 
+           reproduced):
+             state = ROUND_SUCCESS
+             stateTimer = millis()
+       
+       IF MISMATCH (wrong input):
+         - Update bestScore if current score is a new record
+         - state = ROUND_FAIL
+         - stateTimer = millis()
+
+  D) LIVE VISUAL FEEDBACK WHILE BUTTON IS CURRENTLY HELD DOWN:
+     if (currentlyPressed) {
+       unsigned long heldTime = millis() - pressStartTime;
+       drawHoldingFeedback(heldTime);
+     }
+     This provides REAL-TIME feedback showing a growing bar as the 
+     player holds the button, with a threshold marker line - helping 
+     players learn to calibrate their timing (this is a significant 
+     UX improvement over a "blind" hold with no visual feedback).
+
+--------------------------------------------------------------------------------
+5.7 void drawFlash(int type, bool on)
+--------------------------------------------------------------------------------
+PURPOSE: Renders a single flash of the sequence during the watch phase.
+
+PARAMETERS:
+  - type: 0 (short) or 1 (long) - determines bar width and label
+  - on: true (currently showing) or false (currently in gap/blank period)
+
+WHAT IT DRAWS:
+  1. Always shows HUD: current Level and Sequence length (top of screen)
+  2. Always shows "WATCH CAREFULLY" instruction text
+  3. IF on == true:
+     - IF type == 1 (LONG): draws a WIDE rounded rectangle (100px wide) 
+       with "LONG" label text in BLACK (inverted, since it's drawn on 
+       top of the white filled bar)
+     - IF type == 0 (SHORT): draws a NARROW rounded rectangle (40px wide) 
+       with "SHORT" label text in BLACK
+  4. IF on == false: the bar area remains blank (gap period), only HUD 
+     and instruction text are shown
+
+DESIGN NOTE: The visual size difference (wide vs narrow bar) reinforces 
+the LONG/SHORT concept both through TEXT LABEL and VISUAL WIDTH 
+simultaneously, aiding memorability.
+
+--------------------------------------------------------------------------------
+5.8 void drawWaitingScreen()
+--------------------------------------------------------------------------------
+PURPOSE: Displayed once when transitioning into WAITING_INPUT state, 
+showing the player they should now begin their input.
+
+CONTENT SHOWN:
+  - Level and Sequence length (HUD, same as during watch phase)
+  - "YOUR TURN!" prompt
+  - "Short tap / Long hold" reminder instruction
+  - Current progress: "Step: [inputIndex+1]/[sequenceLength]" - shows 
+    the player exactly which step of the sequence they're currently 
+    expected to input
+
+--------------------------------------------------------------------------------
+5.9 void drawHoldingFeedback(unsigned long heldTime)
+--------------------------------------------------------------------------------
+PURPOSE: Real-time visual feedback shown WHILE the button is currently 
+being held down, updating continuously as long as the press continues.
+
+WHAT IT DRAWS:
+  1. "HOLDING..." status text
+  2. A growing filled bar whose width is proportional to how long the 
+     button has been held so far:
+       barWidth = map(constrain(heldTime, 0, LONG_PRESS_THRESHOLD+200), 
+                      0, LONG_PRESS_THRESHOLD+200, 0, 100)
+     This maps the held duration (capped at threshold+200ms) to a 
+     0-100 pixel width value.
+  3. A vertical MARKER LINE positioned exactly at the LONG_PRESS_THRESHOLD 
+     point within the bar - this shows the player EXACTLY where "short" 
+     becomes "long", so they can visually see when they've crossed into 
+     LONG territory while still holding the button.
+
+DESIGN NOTE: This is a particularly clever piece of UX design for a 
+memory/timing game - it turns an otherwise "blind" timing mechanic (the 
+player can't normally see elapsed milliseconds) into a visually 
+understandable action with clear real-time feedback.
+
+--------------------------------------------------------------------------------
+5.10 void drawCorrectFeedback()
+--------------------------------------------------------------------------------
+PURPOSE: Brief confirmation shown immediately after each correct input 
+step (not just at the end of the full sequence).
+
+CONTENT SHOWN:
+  - Large text (size 2): "GOOD!"
+
+NOTE: Uses delay(300) - a rare blocking call in this codebase, used 
+deliberately here for simplicity since a brief 300ms freeze between 
+input steps is imperceptible/acceptable in this context and greatly 
+simplifies the feedback logic.
+
+--------------------------------------------------------------------------------
+5.11 void drawRoundSuccess()
+--------------------------------------------------------------------------------
+PURPOSE: Shown when the ENTIRE sequence has been correctly reproduced, 
+displayed for 1000ms (handled in the ROUND_SUCCESS case within loop()) 
+before advancing to the next (longer) round.
+
+CONTENT SHOWN:
+  - "SEQUENCE COMPLETE!"
+  - Current score
+  - "Next round..." (indicates automatic progression, no button needed)
+
+--------------------------------------------------------------------------------
+5.12 void drawRoundFail()
+--------------------------------------------------------------------------------
+PURPOSE: Shown when the player makes an incorrect input, displayed for 
+1500ms before transitioning to the Game Over screen.
+
+CONTENT SHOWN:
+  - "WRONG!"
+  - "Expected: LONG" or "Expected: SHORT" - tells the player exactly 
+    what input was expected at the point they failed (educational 
+    feedback, helps players understand their mistake)
+  - Current score (final score, since the game is about to end)
+
+--------------------------------------------------------------------------------
+5.13 void drawGameOver()
+--------------------------------------------------------------------------------
+PURPOSE: Final results screen shown after ROUND_FAIL transitions here.
+
+CONTENT SHOWN:
+  - "GAME OVER"
+  - "Final Score: [score]"
+  - "Best Score: [bestScore]"
+  - "Press to Play Again"
+
+--------------------------------------------------------------------------------
+5.14 void drawStartScreen()
+--------------------------------------------------------------------------------
+PURPOSE: Title/instructions screen shown before gameplay begins.
+
+CONTENT SHOWN:
+  - "MEMORY BEEP" title
+  - "Watch the pattern," / "then repeat it back!" instructions
+  - "Short tap / Long hold" control reminder
+  - "Press to Start" prompt
+
+================================================================================
+6. GAME STATE FLOW DIAGRAM
+================================================================================
+
+    [POWER ON] -> generateSequence() (fills all 50 slots once)
+         |
+         v
+  +----------------+
+  | START_SCREEN   | <----------------------------------------------+
+  +----------------+                                                 |
+         |                                                           |
+         | (button pressed -> startNewGame())                       |
+         v                                                           |
+  +--------------------+                                             |
+  | SHOWING_SEQUENCE   |<--------------------------------+           |
+  | (replay full        |                                 |          |
+  |  sequence from       |                                |          |
+  |  index 0 each time)  |                                |          |
+  +--------------------+                                  |          |
+         |                                                |          |
+         | (all steps shown)                              |          |
+         v                                                |          |
+  +--------------------+                                  |          |
+  |  WAITING_INPUT      |                                 |          |
+  |  (player reproduces  |                                |          |
+  |   sequence step by    |                               |          |
+  |   step)                |                              |          |
+  +--------------------+                                  |          |
+         |                              |                            |
+         | (all correct)                | (any wrong)                |
+         v                              v                            |
+  +----------------+           +----------------+                    |
+  | ROUND_SUCCESS  |           |  ROUND_FAIL     |                    |
+  | (1000ms pause) |           |  (1500ms pause) |                    |
+  +----------------+           +----------------+                    |
+         |                              |                            |
+         | (sequenceLength++,           | (state = GAME_OVER_STATE)  |
+         |  loop back to                v                            |
+         |  SHOWING_SEQUENCE) ----------+                    +----------------+
+                                                              | GAME_OVER_STATE|
+                                                              +----------------+
+                                                                       |
+                                                                       | (button
+                                                                       |  pressed)
+                                                                       +----------+
+                                                                                  (back to START_SCREEN)
+
+================================================================================
+7. KEY TECHNICAL CONCEPTS DEMONSTRATED
+================================================================================
+
+1. ENUM-BASED STATE MACHINE
+   Unlike the simpler boolean-flag approach in Flappy Bird and Stop The 
+   Bar, this game uses a proper C++ enum with a switch statement - a 
+   more scalable and readable pattern when managing 6+ distinct game 
+   states.
+
+2. ENCODING COMPLEX INPUT WITH A SINGLE BUTTON
+   Since traditional Simon Says requires 4 buttons/colors, this game 
+   demonstrates a clever workaround: encoding a binary sequence (0/1) 
+   using PRESS DURATION instead of press location/color. This is a key 
+   lesson in adapting classic game concepts to constrained hardware.
+
+3. MULTI-PHASE NON-BLOCKING TIMED ANIMATION
+   handleShowingSequence() manages THREE sequential timing phases 
+   (ON -> GAP -> ADVANCE) per sequence element, all using millis() 
+   comparisons rather than delay(), allowing the button to remain 
+   responsive even during "animation" playback (though input isn't 
+   accepted until WAITING_INPUT state).
+
+4. PRESS-AND-RELEASE DURATION MEASUREMENT
+   Building on simpler edge detection (seen in Stop The Bar), this game 
+   goes further by measuring the FULL press-to-release duration to 
+   classify input into two categories (short/long), rather than just 
+   detecting a single press event.
+
+5. REAL-TIME VISUAL FEEDBACK DURING INPUT
+   drawHoldingFeedback() continuously updates WHILE the button is held, 
+   giving the player live feedback about their timing relative to the 
+   threshold - a UX pattern not present in the simpler games, valuable 
+   for any timing-sensitive input mechanic.
+
+6. PRE-GENERATED VS. ON-DEMAND RANDOM SEQUENCES
+   Unlike Flappy Bird (which generates new pipe positions on-demand as 
+   old ones scroll off-screen), this game pre-generates the ENTIRE 
+   sequence upfront and replays it from the beginning each round - a 
+   necessary approach for "remember the growing pattern" style games.
+
+7. EDUCATIONAL FAILURE FEEDBACK
+   drawRoundFail() explicitly tells the player what was EXPECTED at the 
+   point of failure, rather than just saying "wrong" - a thoughtful 
+   design choice that helps players understand and improve.
+
+================================================================================
+8. CUSTOMIZATION GUIDE
+================================================================================
+
+WANT TO...                          | CHANGE THIS VARIABLE/VALUE
+-------------------------------------|------------------------------------------
+Make short/long easier to distinguish| SHORT_DURATION = 300, LONG_DURATION = 700 
+                                      | -> increase the gap between these two 
+                                      | values (e.g., 250 and 900)
+Change the short/long press threshold| LONG_PRESS_THRESHOLD = 400  ->  adjust 
+                                      | to match comfortable press timing for 
+                                      | your target audience
+Make sequence playback faster/slower | Adjust SHORT_DURATION, LONG_DURATION, 
+                                      | and GAP_DURATION together
+Change how quickly level increases   | if (sequenceLength % 3 == 0)  ->  
+                                      | change 3 to a different interval
+Allow longer sequences                | MAX_SEQUENCE = 50  ->  increase (ensure 
+                                      | enough RAM available on Arduino Nano - 
+                                      | each int is 2 bytes, so 50 ints = 100 
+                                      | bytes, quite safe to increase)
+Change scoring formula                | score += level;  ->  modify to any 
+                                      | formula (e.g., score += sequenceLength 
+                                      | for length-based scoring instead)
+Adjust "GOOD!" feedback duration      | delay(300) inside drawCorrectFeedback() 
+                                      | -> change to a different value
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+ISSUE: Short presses are sometimes registered as long, or vice versa
+FIX: LONG_PRESS_THRESHOLD (400ms) may not match the player's natural 
+     tapping speed. Test with your target users and adjust the threshold 
+     value accordingly. Also verify no mechanical button bounce is 
+     adding extra milliseconds to press duration readings.
+
+ISSUE: Game seems to "skip" or misjudge the first input after watching 
+       the sequence
+FIX: Ensure buttonWasPressed is properly reset to false when transitioning 
+     from SHOWING_SEQUENCE to WAITING_INPUT state - if the button happens 
+     to be physically held down at the exact moment of transition, this 
+     could cause an incorrect initial reading. Consider adding an 
+     explicit reset of buttonWasPressed = false in the transition code 
+     within handleShowingSequence() when switching to WAITING_INPUT.
+
+ISSUE: Display flickers excessively during the watch phase
+FIX: This is expected behavior since drawFlash() is called every loop 
+     iteration during the "ON" phase (redrawing the same frame 
+     repeatedly). This is generally not visually problematic on OLED 
+     displays, but if it becomes an issue, consider adding a check to 
+     only call drawFlash() once when the phase begins, rather than 
+     every loop iteration.
+
+ISSUE: Sequence becomes impossible to remember at higher levels
+FIX: This is a natural difficulty curve for memory games. If you want a 
+     gentler curve, consider adding audio cues (if a buzzer is added to 
+     your hardware) to reinforce visual memory, or slow down 
+     SHORT_DURATION/LONG_DURATION at higher levels to give more 
+     processing time per flash.
+
+ISSUE: bestScore resets unexpectedly
+FIX: Verify that bestScore is only updated within handleWaitingInput() 
+     upon a MISMATCH (if (score > bestScore) bestScore = score;), and 
+     that no other function accidentally resets this variable. Note 
+     that unlike Stop The Bar's bestStreak, this variable is updated 
+     ONLY on failure, not on every successful round - if you want it 
+     updated continuously, you may need to add an additional check in 
+     ROUND_SUCCESS handling as well.
+
+================================================================================
+10. CODE STATISTICS
+================================================================================
+
+Total Lines of Code    : ~280
+Functions              : 14 (setup, generateSequence, loop, startNewGame, 
+                          handleShowingSequence, handleWaitingInput, 
+                          drawFlash, drawWaitingScreen, drawHoldingFeedback, 
+                          drawCorrectFeedback, drawRoundSuccess, 
+                          drawRoundFail, drawGameOver, drawStartScreen)
+Global Variables        : ~20
+Arrays Used             : 1 (sequence[50] - the largest array among all 
+                          GameCraft games so far)
+State Machine Type      : Enum + switch (most advanced state management 
+                          pattern among the documented games)
+Libraries Required      : 4 (SPI, Wire, Adafruit_GFX, Adafruit_SH110X)
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
